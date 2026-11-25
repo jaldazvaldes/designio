@@ -1,0 +1,19 @@
+{
+  "name": "@designio/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "designio-server": "dist/cli.js"
+  },
+  "dependencies": {
+    "@designio/core": "*",
+    "@fastify/websocket": "^11.3.7",
+    "chokidar": "^4.0.3",
+    "fastify": "^5.12.8",
+    "image-size": "^2.1.0",
+    "playwright-core": "^1.65.1",
+    "tinyglobby": "^0.2.17",
+    "zod": "^4.6.7"
+  }
+}

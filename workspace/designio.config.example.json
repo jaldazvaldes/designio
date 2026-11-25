@@ -1,0 +1,18 @@
+{
+  "$comment": "Copia este archivo como designio.config.json. Cada alias se usa en las referencias de assets («alias:ruta/archivo.png») y de componentes («story:alias/id»). writable: carpetas donde se permite exportar (vacío = solo lectura).",
+  "projects": {
+    "miapp": {
+      "label": "Mi app",
+      "root": "C:/ruta/a/mi-app",
+      "writable": [],
+      "storybook": {
+        "url": "http://127.0.0.1:6006",
+        "start": {
+          "cwd": ".",
+          "command": "npx",
+          "args": ["storybook", "dev", "-p", "6006", "--host", "127.0.0.1", "--ci", "--disable-telemetry", "--no-version-updates"]
+        }
+      }
+    }
+  }
+}

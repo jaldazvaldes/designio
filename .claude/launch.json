@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "designio",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["packages/server/dist/cli.js", "start"],
+      "port": 4517
+    },
+    {
+      "name": "designio-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/dev.mjs"],
+      "port": 5173
+    }
+  ]
+}

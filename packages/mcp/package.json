@@ -1,0 +1,14 @@
+{
+  "name": "@designio/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "designio-mcp": "dist/index.js"
+  },
+  "dependencies": {
+    "@designio/core": "*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}

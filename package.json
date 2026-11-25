@@ -1,0 +1,35 @@
+{
+  "name": "designio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "designio: lienzo de diseño local y gratuito que la IA puede usar por MCP",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "designio": "bin/designio.mjs"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build -w @designio/web && node scripts/build-node.mjs",
+    "start": "node packages/server/dist/cli.js start --open",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "biome check .",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1",
+    "ws": "^8.23.0"
+  }
+}
