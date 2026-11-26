@@ -5,6 +5,8 @@
       "label": "Mi app",
       "root": "C:/ruta/a/mi-app",
       "writable": [],
+      "tokens": "src/styles/tokens.css",
+      "screens": ["src/screens/**/*Screen.tsx", "src/pages/**/*.tsx"],
       "storybook": {
         "url": "http://127.0.0.1:6006",
         "start": {

@@ -79,6 +79,10 @@ describe.skipIf(!built)('MCP de punta a punta (requiere npm run build)', () => {
       'create_document',
       'import_files',
       'import_components',
+      'connect_flow',
+      'get_flow',
+      'update_page',
+      'audit_project',
       'render',
       'get_decisions',
       'list_comments',
@@ -143,5 +147,23 @@ describe.skipIf(!built)('MCP de punta a punta (requiere npm run build)', () => {
     const decisions = await call('get_decisions', { doc });
     expect(decisions.text).toContain('Maqueta');
     expect(decisions.text).toContain('Lista para revisar');
+
+    const extra = await call('create_nodes', {
+      doc,
+      nodes: [{ type: 'frame', id: 'cierre', name: 'Resumen final', device: 'galaxy-s24', x: 520, y: 2000 }],
+    });
+    expect(extra.isError).toBeFalsy();
+
+    const flowRes = await call('connect_flow', {
+      doc,
+      entry: 'maqueta',
+      summary: 'Recorrido de prueba desde la maqueta hasta el cierre.',
+      connections: [{ from: 'maqueta', to: 'cierre', label: 'Pulsar Terminar' }],
+    });
+    expect(flowRes.isError).toBeFalsy();
+
+    const flowMap = await call('get_flow', { doc });
+    expect(flowMap.text).toContain('Recorrido de prueba desde la maqueta hasta el cierre.');
+    expect(flowMap.text).toContain('Pulsar Terminar');
   });
 });

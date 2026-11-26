@@ -5,8 +5,9 @@ tú navegas, editas, comentas y decides; la IA (Claude Code, Codex o cualquier c
 crea y modifica tableros, **ve el resultado como imagen** y lee tus comentarios y decisiones.
 Sin cuentas, sin nube y sin claves de API.
 
-- **Lienzo infinito**: marcos, texto, formas, imágenes (con recorte), flechas, HTML vivo y
+- **Lienzo infinito**: marcos, texto, formas, imágenes (con recorte), conectores vivos de flujo, HTML vivo y
   **componentes vivos de Storybook**.
+- **Navegación humana**: cada página explica de qué va (`summary`), cuál es su inicio (`★`) y **de dónde a dónde va** el usuario entre pantallas, con barra interactiva para recorrer el flujo.
 - **Proyectos conectados en solo lectura**: las capturas, ilustraciones, iconos y prototipos de
   tus repos se enlazan, no se copian.
 - **Decisiones humanas**: solo tú marcas *Aprobado* o *Rechazado*; la IA las lee y no puede
@@ -65,6 +66,8 @@ Copia `workspace/designio.config.example.json` como `workspace/designio.config.j
     "miapp": {
       "root": "C:/ruta/a/mi-app",
       "writable": [],
+      "tokens": "src/styles/tokens.css",
+      "screens": ["src/screens/**/*Screen.tsx", "src/pages/**/*.tsx"],
       "storybook": {
         "url": "http://127.0.0.1:6006",
         "start": { "cwd": ".", "command": "npx", "args": ["storybook", "dev", "-p", "6006", "--host", "127.0.0.1", "--ci", "--disable-telemetry", "--no-version-updates"] }
@@ -89,6 +92,8 @@ Tus documentos y tu configuración viven en `workspace/` y no se suben al reposi
 |---|---|
 | Desplazar / zoom | rueda · Ctrl+rueda · Espacio+arrastrar · botón central |
 | Ver todo / ver selección / 100 % | ⇧1 · ⇧2 · Ctrl+0 |
+| Bocetar pantalla / bloque / texto / conectar flujo | F · R · T · L |
+| Plegar panel izquierdo | [ |
 | Entrar en un grupo / selección profunda | doble clic · Ctrl+clic |
 | Interactuar con HTML o un componente | doble clic sobre él (Esc para salir) |
 | Comentar | C |

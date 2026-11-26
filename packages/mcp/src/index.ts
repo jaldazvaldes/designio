@@ -1,12 +1,17 @@
 import {
+  analyzePageFlow,
   type Comment,
   DEVICE_PRESETS,
   type DesignioDocument,
+  describePageFlow,
   findNode,
+  findPage,
   isContainer,
   NODE_TYPES,
   type Node,
+  type Page,
   type STATUS_LABELS,
+  walkNodes,
 } from '@designio/core';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -70,6 +75,16 @@ const ACTIVITY: Record<string, Activity> = {
     targets: a.ids,
   }),
   add_page: (a) => ({ text: `está creando la página «${a.name}»` }),
+  update_page: () => ({ text: 'está explicando el recorrido de la página' }),
+  connect_flow: (a) => ({
+    text: 'está trazando la navegación entre pantallas',
+    targets: [
+      ...(a.entry ? [a.entry] : []),
+      ...(a.connections ?? []).flatMap((c: { from: string; to: string }) => [c.from, c.to]),
+    ],
+  }),
+  get_flow: () => ({ text: 'está revisando la navegación de la página' }),
+  audit_project: () => ({ text: 'está contrastando el lienzo con el código del proyecto' }),
   import_files: (a) => ({ text: `está importando ${a.glob ? `«${a.glob}»` : 'archivos'} de ${a.project}` }),
   import_components: (a) => ({
     text: `está trayendo componentes de Storybook${a.filter ? ` («${a.filter}»)` : ''}`,
@@ -167,7 +182,12 @@ function describe(node: Node): string {
   if (node.type === 'text')
     extra = ` "${node.text.slice(0, 60).replace(/\n/g, ' ')}${node.text.length > 60 ? '…' : ''}"`;
   if (node.type === 'frame' && node.device) extra = ` device=${node.device}`;
+  if (node.type === 'arrow' && (node.fromId || node.toId)) {
+    extra = ` ${node.fromId ?? '?'} ──${node.label ? `[${node.label}]` : ''}──▶ ${node.toId ?? '?'}`;
+  }
+  if (node.source) extra += ` code=${node.source}`;
   const flags = [
+    node.entry ? '★ inicio' : '',
     node.status ? STATUS_MARK[node.status] : '',
     node.hidden ? '(oculto)' : '',
     node.locked ? '(bloqueado)' : '',
@@ -212,7 +232,8 @@ const NodeSpecSchema = z
       'rect/ellipse: fill?, stroke?, strokeWidth?, radius?. text: text, fontSize?, fontWeight?, color?, align?, lineHeight?. ' +
       'image: src ("alias:ruta.png" o "local:ruta"), fit? (contain|cover|fill), crop?{x,y,w,h en px de la imagen original}. ' +
       'html: src o html (HTML completo en línea, se guarda como archivo), device? o viewport?{w,h}. Para componentes de Storybook: src "story:alias/id". ' +
-      'arrow: from{x,y}, to{x,y}, color?, strokeWidth?, head?.',
+      'arrow: from{x,y}, to{x,y} o bien fromId/toId + label? (conector vivo que sigue a las pantallas), color?, strokeWidth?, head?. ' +
+      'source?: "alias:ruta/Componente.tsx" vincula una pantalla con el archivo real del proyecto. entry?: true marca la pantalla inicial del flujo.',
   );
 
 const server = new McpServer(
@@ -220,11 +241,12 @@ const server = new McpServer(
   {
     instructions: [
       'designio es un lienzo de diseño local (tipo Figma) que la persona ve en su navegador mientras tú lo editas.',
-      'Flujo recomendado: status → create_document (o list_documents) → import_files / import_components / create_nodes → arrange → render para COMPROBAR visualmente → contar a la persona la URL del editor.',
+      'Flujo recomendado: status → create_document (o list_documents) → import_files / import_components / create_nodes → arrange → connect_flow / update_page (para explicar qué hace cada página y de dónde a dónde va) → render para COMPROBAR visualmente → contar a la persona la URL del editor.',
       'Coordenadas en px CSS relativas al padre. Si no das x/y en el primer nivel, el servidor coloca lo nuevo a la derecha de lo existente.',
-      'Los proyectos conectados son de solo lectura: referencia sus archivos como "alias:ruta/archivo.png". Los componentes vivos de Storybook se referencian como "story:alias/id-de-historia".',
-      'Para maquetas nuevas, crea nodos html con HTML completo en línea (se guarda como archivo editable) y el preset de dispositivo adecuado (galaxy-s24 = 360×780, exporta a 1080×2340).',
-      'Las decisiones son humanas: NO puedes marcar approved/rejected ni cambiarlas; usa get_decisions para leerlas y respetarlas. Puedes usar draft o proposed.',
+      'Los proyectos conectados son de solo lectura: referencia sus archivos como "alias:ruta/archivo.png" y vincula cada pantalla con su código mediante source="alias:ruta/Pantalla.tsx". Usa audit_project para leer los tokens reales del proyecto, ver qué pantallas del código faltan en el lienzo y detectar capturas desfasadas.',
+      'Para maquetas nuevas, crea nodos html con HTML completo en línea (se guarda como archivo editable) y el preset adecuado (galaxy-s24, mobile-320, wear-round, tablet-800, desktop-1440…). Para comparar web + móvil a la vez, usa devices en import_files.',
+      'Haz que las páginas se entiendan de forma humana: usa update_page para darle un «summary» claro a la página y connect_flow (entry + connections con «label») para mostrar de qué pantalla a cuál se navega y con qué acción.',
+      'Las decisiones son humanas: NO puedes marcar approved/rejected ni alterar el contenido de elementos aprobados o rechazados; usa get_decisions para leerlas y respetarlas. Puedes usar draft o proposed.',
       'Lee los comentarios de la persona con list_comments y respóndelos con reply_comment cuando los atiendas. Cada cambio tuyo es una transacción que la persona puede deshacer.',
       'Escribe para personas: nombres en español natural y con tildes («Entreno clásico», no «01-entreno-clasico»); renombra lo importado si ayuda. En «label» usa una frase corta en pasado y en tercera persona («Recortó las láminas del 5 sep en 7 pantallas»): la persona verá «<tu nombre> recortó…» en su lienzo mientras trabajas.',
     ].join('\n'),
@@ -249,6 +271,7 @@ registerTool(
         root: string;
         exists: boolean;
         writable: string[];
+        tokens: string | null;
         storybook: { url: string; running: boolean; canStart: boolean } | null;
       }[];
       docs: { id: string; name: string; nodes: number; openComments: number; error?: string }[];
@@ -261,6 +284,8 @@ registerTool(
       ...s.projects.map(
         (p) =>
           `- ${p.alias}: ${p.root}${p.exists ? '' : ' (NO EXISTE)'}${p.writable.length ? ` · exportable en ${p.writable.join(', ')}` : ''}${
+            p.tokens ? ` · tokens ${p.alias}:${p.tokens}` : ''
+          }${
             p.storybook
               ? ` · Storybook ${p.storybook.url} ${p.storybook.running ? 'en marcha' : p.storybook.canStart ? 'parado (se arranca solo al usarlo)' : 'parado'}`
               : ''
@@ -360,7 +385,13 @@ registerTool(
           '',
           `Página «${page.name}» [id ${page.id}] · ${page.children.length} elementos de primer nivel`,
         );
+        if (page.summary) lines.push(`  De qué va: ${page.summary}`);
         outline(page.children, 0, depth, lines);
+        const flowLines = describePageFlow(page).filter((l) => !l.startsWith('Resumen:'));
+        if (flowLines.length > 0) {
+          lines.push('  Navegación:');
+          for (const fl of flowLines) lines.push(`    ${fl}`);
+        }
       }
     }
     lines.push('', `Editor: ${await client.editorUrl(args.doc)}`);
@@ -518,15 +549,285 @@ registerTool(
   'add_page',
   {
     title: 'Añadir página',
-    description: 'Crea una página nueva en el documento.',
-    inputSchema: { doc: z.string(), name: z.string() },
+    description: 'Crea una página nueva en el documento, opcionalmente con un resumen humano de qué enseña.',
+    inputSchema: {
+      doc: z.string(),
+      name: z.string(),
+      summary: z.string().optional().describe('Explicación breve en lenguaje humano de qué cubre la página'),
+    },
   },
-  tool(async (args: { doc: string; name: string }) => {
+  tool(async (args: { doc: string; name: string; summary?: string }) => {
     const r = await client.request<{ pageId: string }>('POST', `/api/doc/page?id=${enc(args.doc)}`, {
       name: args.name,
+      summary: args.summary,
       author: 'ai',
     });
     return text(`Página creada: ${r.pageId}`);
+  }),
+);
+
+registerTool(
+  'update_page',
+  {
+    title: 'Describir o renombrar página',
+    description:
+      'Actualiza el nombre, el resumen humano («summary»: de qué va la página y cómo leerla) o el fondo de una página.',
+    inputSchema: {
+      doc: z.string(),
+      page: z.string().describe('Id de la página'),
+      name: z.string().optional(),
+      summary: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('Explicación humana del propósito o flujo (null la borra)'),
+      background: z.string().nullable().optional(),
+      label: z.string().optional().describe(LABEL_HINT),
+    },
+  },
+  tool(
+    async (args: {
+      doc: string;
+      page: string;
+      name?: string;
+      summary?: string | null;
+      background?: string | null;
+      label?: string;
+    }) => {
+      const r = await client.request<{ txId: string }>('POST', `/api/doc/page/update?id=${enc(args.doc)}`, {
+        ...args,
+        author: 'ai',
+      });
+      return text(`Página actualizada (tx ${r.txId}).`);
+    },
+  ),
+);
+
+registerTool(
+  'connect_flow',
+  {
+    title: 'Conectar flujo de pantallas',
+    description:
+      'Traza el recorrido humano entre pantallas o elementos de una misma página: de dónde a dónde va el usuario y qué acción o condición lo lleva allí. ' +
+      'Las flechas quedan ancladas a los elementos y se mueven solas al reordenarlos.',
+    inputSchema: {
+      doc: z.string(),
+      entry: z.string().optional().describe('Id de la pantalla inicial del flujo (★ Inicio)'),
+      connections: z
+        .array(
+          z.object({
+            from: z.string().describe('Id del nodo origen'),
+            to: z.string().describe('Id del nodo destino'),
+            label: z.string().optional().describe('Acción o condición humana, p. ej. «Pulsar Guardar serie»'),
+            color: z.string().optional(),
+          }),
+        )
+        .max(200)
+        .optional(),
+      page: z.string().optional().describe('Id de la página si además quieres actualizar su summary'),
+      summary: z.string().optional().describe('Resumen humano opcional para explicar el flujo en la página'),
+      label: z.string().optional().describe(LABEL_HINT),
+    },
+  },
+  tool(
+    async (args: {
+      doc: string;
+      entry?: string;
+      connections?: { from: string; to: string; label?: string; color?: string }[];
+      page?: string;
+      summary?: string;
+      label?: string;
+    }) => {
+      const out: string[] = [];
+      if (args.summary !== undefined) {
+        const doc = await getDoc(args.doc);
+        const targetPage =
+          (args.page ? findPage(doc, args.page) : null) ??
+          (args.entry ? findNode(doc, args.entry)?.page : null) ??
+          (args.connections?.[0] ? findNode(doc, args.connections[0].from)?.page : null) ??
+          doc.pages[0]!;
+        await client.request('POST', `/api/doc/page/update?id=${enc(args.doc)}`, {
+          page: targetPage.id,
+          summary: args.summary,
+          author: 'ai',
+        });
+        out.push(`Resumen guardado en «${targetPage.name}».`);
+      }
+      if ((args.connections && args.connections.length > 0) || args.entry) {
+        const r = await client.request<{ txId: string; created: string[]; updated: string[] }>(
+          'POST',
+          `/api/doc/connect?id=${enc(args.doc)}`,
+          {
+            connections: args.connections,
+            entry: args.entry,
+            label: args.label,
+            author: 'ai',
+          },
+        );
+        out.push(
+          `Flujo actualizado (tx ${r.txId}): ${r.created.length} conexiones nuevas, ${r.updated.length} actualizadas.`,
+        );
+      }
+      if (out.length === 0) throw new Error('Indica «connections», «entry» o «summary».');
+      return text([...out, 'Comprueba el recorrido con render o get_flow.'].join('\n'));
+    },
+  ),
+);
+
+function describePageHumanMap(page: Page): string {
+  const flow = analyzePageFlow(page);
+  const lines = [`Página «${page.name}» [${page.id}]`];
+  if (page.summary) lines.push(`  De qué va: ${page.summary}`);
+  else lines.push('  De qué va: (sin resumen todavía; usa update_page o connect_flow para explicarla)');
+  if (flow.entries.length > 0) {
+    lines.push(`  Empieza en: ${flow.entries.map((e) => `★ «${e.name}» #${e.id}`).join(', ')}`);
+  }
+  if (flow.steps.length > 0) {
+    lines.push('  Recorrido paso a paso:');
+    for (const step of flow.steps) {
+      const outs = flow.outgoing.get(step.id) ?? [];
+      const ins = flow.incoming.get(step.id) ?? [];
+      lines.push(
+        `    ${step.isEntry ? '★' : '•'} «${step.name}» #${step.id}` +
+          (ins.length
+            ? `  ← viene de ${ins.map((e) => `«${e.fromName}»${e.label ? ` (${e.label})` : ''}`).join(', ')}`
+            : '') +
+          (outs.length
+            ? `  → va a ${outs.map((e) => `«${e.toName}»${e.label ? ` (${e.label})` : ''}`).join(', ')}`
+            : '  → (fin de rama)'),
+      );
+    }
+  } else {
+    lines.push('  Recorrido: (todavía no hay conexiones entre pantallas en esta página)');
+  }
+  const connected = new Set(flow.steps.map((s) => s.id));
+  const loose: string[] = [];
+  const topScreens =
+    page.children.length === 1 && page.children[0]?.type === 'frame'
+      ? page.children[0].children
+      : page.children;
+  walkNodes(topScreens, (n, _parent, d) => {
+    if (d === 0 && n.type !== 'text' && n.type !== 'arrow' && !n.hidden && !connected.has(n.id)) {
+      loose.push(`«${n.name}» #${n.id}`);
+    }
+  });
+  if (loose.length > 0 && flow.steps.length > 0) {
+    lines.push(
+      `  Sin conectar (${loose.length}): ${loose.slice(0, 15).join(', ')}${loose.length > 15 ? ', …' : ''}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+registerTool(
+  'get_flow',
+  {
+    title: 'Leer mapa de navegación',
+    description:
+      'Explica de forma humana cada página: de qué va, por qué pantalla empieza, de dónde a dónde va cada paso y qué pantallas siguen sueltas.',
+    inputSchema: {
+      doc: z.string(),
+      page: z.string().optional().describe('Id de página (por defecto todas)'),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  tool(async (args: { doc: string; page?: string }) => {
+    const doc = await getDoc(args.doc);
+    const pages = args.page ? doc.pages.filter((p) => p.id === args.page) : doc.pages;
+    if (pages.length === 0) throw new Error(`No existe la página «${args.page}»`);
+    return text(pages.map(describePageHumanMap).join('\n\n'));
+  }),
+);
+
+registerTool(
+  'audit_project',
+  {
+    title: 'Auditar vínculo con el código del proyecto',
+    description:
+      'Cruza en solo lectura el documento con el repositorio conectado: devuelve sus tokens visuales reales (colores y radios), el número de build si existe, qué pantallas del código están cubiertas en el lienzo, cuáles tienen capturas antiguas (el código cambió después) y qué pantallas faltan por representar.',
+    inputSchema: {
+      doc: z.string().describe('Id del documento (carpeta/nombre)'),
+      project: z.string().optional().describe('Alias del proyecto (por defecto el asociado al documento)'),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  tool(async (args: { doc: string; project?: string }) => {
+    const params = new URLSearchParams({ doc: args.doc });
+    if (args.project) params.set('project', args.project);
+    const audit = await client.request<{
+      project: string;
+      doc: string;
+      buildNumber?: number;
+      totalScreensInCode: number;
+      coveredScreens: string[];
+      unlinkedScreens: string[];
+      staleNodes: {
+        id: string;
+        name: string;
+        page: string;
+        source: string;
+        codeMtime: string;
+        assetMtime: string;
+      }[];
+      missingSourceNodes: { id: string; name: string; page: string; source: string }[];
+    }>('GET', `/api/projects/audit?${params}`);
+
+    const tokens = await client
+      .request<{
+        path: string | null;
+        colors: { name: string; value: string }[];
+        metrics: { name: string; value: number }[];
+      }>('GET', `/api/projects/tokens?project=${enc(audit.project)}`)
+      .catch(() => ({ path: null, colors: [], metrics: [] }));
+
+    const lines = [
+      `Proyecto «${audit.project}»${audit.buildNumber !== undefined ? ` · build actual en código: b${audit.buildNumber}` : ''} ↔ documento «${audit.doc}»`,
+      `Cobertura de pantallas/hojas del código: ${audit.coveredScreens.length} de ${audit.totalScreensInCode} vinculadas en el lienzo.`,
+    ];
+
+    if (tokens.path) {
+      lines.push('', `Tokens visuales (${audit.project}:${tokens.path}):`);
+      if (tokens.colors.length) {
+        lines.push(`  Colores: ${tokens.colors.map((c) => `${c.name}=${c.value}`).join(', ')}`);
+      }
+      if (tokens.metrics.length) {
+        lines.push(`  Métricas: ${tokens.metrics.map((m) => `${m.name}=${m.value}px`).join(', ')}`);
+      }
+    }
+
+    if (audit.staleNodes.length > 0) {
+      lines.push(
+        '',
+        `⚠ Capturas o vistas desfasadas (${audit.staleNodes.length}: el código fuente cambió después de la imagen):`,
+      );
+      for (const s of audit.staleNodes) {
+        lines.push(
+          `  - «${s.name}» #${s.id} (${s.page}) → ${s.source} (código ${s.codeMtime.slice(0, 10)} > captura ${s.assetMtime.slice(0, 10)})`,
+        );
+      }
+    }
+
+    if (audit.missingSourceNodes.length > 0) {
+      lines.push('', `✗ Vínculos rotos (${audit.missingSourceNodes.length}):`);
+      for (const m of audit.missingSourceNodes) {
+        lines.push(`  - «${m.name}» #${m.id} (${m.page}) apunta a ${m.source} (no existe)`);
+      }
+    }
+
+    if (audit.unlinkedScreens.length > 0) {
+      lines.push(
+        '',
+        `○ Pantallas/hojas del código que aún NO están vinculadas en el lienzo (${audit.unlinkedScreens.length}):`,
+      );
+      for (const u of audit.unlinkedScreens) lines.push(`  - ${audit.project}:${u}`);
+    } else if (audit.totalScreensInCode > 0) {
+      lines.push(
+        '',
+        '✓ Todas las pantallas y hojas detectadas en el código están representadas en el lienzo.',
+      );
+    }
+
+    return text(lines.join('\n'));
   }),
 );
 
@@ -591,6 +892,12 @@ registerTool(
         .optional()
         .describe('Etiquetas de cada tamaño, p. ej. ["lista","ficha","inspección"]'),
       device: z.string().optional(),
+      devices: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Matriz responsive: varios presets a la vez, p. ej. ["galaxy-s24","tablet-800","desktop-1440"]',
+        ),
       labels: z.boolean().optional(),
       status: z.enum(['draft', 'proposed']).optional(),
       viewport: z.object({ w: z.number().positive(), h: z.number().positive() }).optional(),
