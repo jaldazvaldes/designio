@@ -77,6 +77,30 @@ export function describeArrange(count: number, layout: string): string {
   return `Ordenó ${count} elementos en ${shape}`;
 }
 
+export function describeConnect(
+  doc: DesignioDocument,
+  connections: { from: string; to: string; label?: string }[],
+  entry?: string,
+): string {
+  if (connections.length === 1) {
+    const c = connections[0]!;
+    return `Conectó ${quote(nameOf(doc, c.from))} con ${quote(nameOf(doc, c.to))}${c.label ? ` (${c.label})` : ''}`;
+  }
+  if (connections.length > 1) return `Trazó ${connections.length} pasos de navegación`;
+  if (entry) return `Marcó ${quote(nameOf(doc, entry))} como inicio del recorrido`;
+  return 'Actualizó el flujo de navegación';
+}
+
+export function describePageUpdate(
+  pageName: string,
+  set: { name?: unknown; summary?: unknown; background?: unknown },
+): string {
+  if ('summary' in set && !('name' in set)) return `Describió el recorrido de ${quote(pageName)}`;
+  if ('name' in set && typeof set.name === 'string')
+    return `Renombró ${quote(pageName)} como ${quote(set.name)}`;
+  return `Actualizó la página ${quote(pageName)}`;
+}
+
 export function describeComment(doc: DesignioDocument, nodeId?: string): string {
   return nodeId ? `Comentó en ${quote(nameOf(doc, nodeId))}` : 'Dejó un comentario';
 }

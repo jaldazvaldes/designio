@@ -38,6 +38,8 @@ export interface ImportRequest {
   sizeLabels?: string[];
   /** Preset de dispositivo para enmarcar cada pantalla. */
   device?: string;
+  /** Matriz responsive: muestra cada archivo en varios dispositivos a la vez (móvil, tablet, web…). */
+  devices?: string[];
   labels?: boolean;
   title?: string;
   subtitle?: string;
@@ -86,6 +88,13 @@ export async function importFiles(ctx: ServerContext, req: ImportRequest): Promi
   const warnings: string[] = [];
   const preset = req.device ? getPreset(req.device) : undefined;
   if (req.device && !preset) throw new HttpError(400, `Preset de dispositivo desconocido «${req.device}»`);
+  const multiPresets = req.devices?.length
+    ? req.devices.map((id) => {
+        const p = getPreset(id);
+        if (!p) throw new HttpError(400, `Preset de dispositivo desconocido «${id}»`);
+        return p;
+      })
+    : null;
 
   // 1. Archivos
   let paths: { path: string; size: number }[];
@@ -203,6 +212,86 @@ export async function importFiles(ctx: ServerContext, req: ImportRequest): Promi
         contentH = target.h;
         content = { type: 'image', src, w: contentW, h: contentH, name };
       }
+    } else if (multiPresets) {
+      // Matriz responsive: el mismo HTML en varios dispositivos lado a lado.
+      const pad = 28;
+      const url = assetUrl(src, entry.folder, sandboxOrigin(ctx));
+      let heights = multiPresets.map((p) => p.h);
+      if (req.fitHeight) {
+        try {
+          const measured = await ctx.renderer.measureMany(
+            multiPresets.map(() => url),
+            multiPresets.map((p) => p.w),
+          );
+          heights = measured.map((m, i) => {
+            const p = multiPresets[i]!;
+            if (m instanceof Error) {
+              warnings.push(`No se pudo medir «${file.path}» en ${p.id}: ${m.message.split('\n')[0]}`);
+              return p.h;
+            }
+            if (m.w > p.w + 1) {
+              warnings.push(
+                `«${name}» se desborda en ${p.label.split(' · ')[0]} (${p.w} px → mide ${m.w} px de ancho).`,
+              );
+            }
+            return Math.max(p.h, Math.min(12_000, Math.ceil(m.h)));
+          });
+        } catch (error) {
+          warnings.push(`No se pudo medir «${file.path}»: ${errorMessage(error)}`);
+        }
+      }
+      const children: NodeSpec[] = [
+        {
+          type: 'text',
+          text: name,
+          x: pad,
+          y: pad,
+          h: 28,
+          fontSize: 22,
+          fontWeight: 700,
+          color: '#15201A',
+        },
+        label(file.path, 640, { x: pad, y: pad + 32, h: 18, fontSize: 13, color: '#66706A' }),
+      ];
+      let cx = pad;
+      const top = pad + 66;
+      let maxColH = 0;
+      multiPresets.forEach((p, i) => {
+        const vh = heights[i]!;
+        const maxDisplayW = req.width ?? 720;
+        const dw = Math.min(p.w, maxDisplayW);
+        const dh = req.height ?? Math.round((dw * vh) / p.w);
+        const tag = `${p.label.split(' · ')[0]} · ${p.w}×${vh}`;
+        children.push(label(tag, dw, { x: cx, y: top, h: 20, fontSize: 13, color: '#55595F' }));
+        children.push({
+          type: 'frame',
+          name: `${name} · ${p.label.split(' · ')[0]}`,
+          device: p.id,
+          x: cx,
+          y: top + 28,
+          w: dw,
+          h: dh,
+          radius: Math.round((p.radius * dw) / p.w),
+          fill: '#FFFFFF',
+          children: [
+            {
+              type: 'html',
+              src,
+              viewport: { w: p.w, h: vh },
+              x: 0,
+              y: 0,
+              w: dw,
+              h: dh,
+              name: `${name} (${p.id})`,
+            },
+          ],
+        });
+        cx += dw + 36;
+        maxColH = Math.max(maxColH, 28 + dh);
+      });
+      contentW = cx - 36 + pad;
+      contentH = top + maxColH + pad;
+      content = { type: 'frame', name, w: contentW, h: contentH, fill: '#F6F5F0', radius: 22, children };
     } else {
       // HTML
       let viewport = req.viewport ?? (preset ? { w: preset.w, h: preset.h } : { w: 1280, h: 800 });
@@ -233,7 +322,7 @@ export async function importFiles(ctx: ServerContext, req: ImportRequest): Promi
     }
 
     if (req.status) content.status = req.status;
-    if (req.labels === false || req.sizes?.length) {
+    if (req.labels === false || req.sizes?.length || multiPresets) {
       cells.push(content);
     } else {
       const labelH = labelHeight(name, contentW);
@@ -333,9 +422,11 @@ export async function importFiles(ctx: ServerContext, req: ImportRequest): Promi
         : 'archivos';
   const defaultLabel = req.sizes?.length
     ? `Creó una lámina de inspección con ${n} ${noun} de ${req.project}`
-    : preset
-      ? `Enmarcó ${n} pantallas de ${req.project} en ${preset.label.split(' · ')[0]}`
-      : `Importó ${n} ${noun} de ${req.project} en ${title ? `«${title}»` : 'un tablero'}`;
+    : multiPresets
+      ? `Comparó ${n} ${noun} de ${req.project} en ${multiPresets.length} dispositivos`
+      : preset
+        ? `Enmarcó ${n} pantallas de ${req.project} en ${preset.label.split(' · ')[0]}`
+        : `Importó ${n} ${noun} de ${req.project} en ${title ? `«${title}»` : 'un tablero'}`;
   const tx = ctx.store.apply(req.doc, {
     ops: [{ op: 'node.create', parentId, node: board }],
     label: req.label ?? defaultLabel,

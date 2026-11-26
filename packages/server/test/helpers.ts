@@ -67,12 +67,29 @@ export async function createTestEnv(): Promise<TestEnv> {
     path.join(project, 'html', 'prototipo.html'),
     '<!doctype html><title>p</title><h1>Hola</h1>',
   );
+  await fs.mkdir(path.join(project, 'src', 'screens'), { recursive: true });
+  await fs.mkdir(path.join(project, 'src', 'ui'), { recursive: true });
+  await fs.writeFile(path.join(project, 'src', 'buildInfo.ts'), 'export const BUILD_NUMBER = 284;\n');
+  await fs.writeFile(
+    path.join(project, 'src', 'ui', 'visualTokens.ts'),
+    'export const colors = { green: "#1C4B2B", lime: "#B7F34A" };\nexport const metrics = { cardRadius: 20 };\n',
+  );
+  await fs.writeFile(
+    path.join(project, 'src', 'screens', 'WorkoutScreen.tsx'),
+    'export function WorkoutScreen() { return null; }\n',
+  );
+  await fs.writeFile(
+    path.join(project, 'src', 'screens', 'FriendsSheet.tsx'),
+    'export function FriendsSheet() { return null; }\n',
+  );
   await fs.writeFile(path.join(project, '.env'), 'SECRETO=1');
   await fs.writeFile(path.join(project, 'notas.exe'), 'x');
   await fs.mkdir(workspace, { recursive: true });
   await fs.writeFile(
     path.join(workspace, 'designio.config.json'),
-    JSON.stringify({ projects: { demo: { root: project, writable: ['exports'] } } }),
+    JSON.stringify({
+      projects: { demo: { root: project, writable: ['exports'], tokens: 'src/ui/visualTokens.ts' } },
+    }),
   );
   const server = await startServer({ workspace, port: 0, writeDelayMs: 20 });
   const api = async <T>(

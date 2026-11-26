@@ -1,8 +1,10 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { type DesignioDocument, parseDocument } from '@designio/core';
+import { analyzePageFlow, type DesignioDocument, parseDocument } from '@designio/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
+import { resolveWorkspace } from '../src/paths';
+import { DocumentStore } from '../src/store';
 import { createTestEnv, type TestEnv, wait, waitFor } from './helpers';
 
 let env: TestEnv;
@@ -317,7 +319,7 @@ describe('importación', () => {
     expect(escaped.status).toBe(400);
   });
 
-  it('crea HTML en línea como archivo del workspace', async () => {
+  it('crea HTML en línea como archivo del workspace y protege lo aprobado', async () => {
     const created = await env.api<{ nodes: { id: string }[] }>(
       'POST',
       `/api/doc/nodes?id=${encodeURIComponent(docId)}`,
@@ -329,5 +331,164 @@ describe('importación', () => {
     const id = created.data.nodes[0]!.id;
     const file = path.join(env.workspace, docId.split('/')[0]!, 'html', `${id}.html`);
     expect(await fs.readFile(file, 'utf8')).toBe('<h1>Maqueta</h1>');
+
+    await env.api('POST', `/api/doc/update?id=${encodeURIComponent(docId)}`, {
+      updates: [{ id, set: { status: 'approved' } }],
+      author: 'human',
+    });
+    const aiOverwrite = await env.api<{ error: string }>(
+      'POST',
+      `/api/doc/update?id=${encodeURIComponent(docId)}`,
+      {
+        updates: [{ id, set: { html: '<h1>Pisada</h1>' } }],
+        author: 'ai',
+      },
+    );
+    expect(aiOverwrite.status).toBe(403);
+    expect(await fs.readFile(file, 'utf8')).toBe('<h1>Maqueta</h1>');
+  });
+
+  it('crea una matriz responsive multi-dispositivo y traza navegación persistiendo el historial', async () => {
+    const matrix = await env.api<{ boardId: string; count: number }>('POST', '/api/import', {
+      doc: docId,
+      project: 'demo',
+      files: ['html/prototipo.html'],
+      devices: ['mobile-320', 'galaxy-s24', 'desktop-1440'],
+      title: 'Comparativa responsive',
+      author: 'ai',
+    });
+    expect(matrix.status).toBe(200);
+    expect(matrix.data.count).toBe(1);
+
+    const screens = await env.api<{ nodes: { id: string }[] }>(
+      'POST',
+      `/api/doc/nodes?id=${encodeURIComponent(docId)}`,
+      {
+        nodes: [
+          { type: 'frame', name: 'Inicio', device: 'galaxy-s24', x: 0, y: 3000 },
+          { type: 'frame', name: 'Detalle', device: 'galaxy-s24', x: 500, y: 3000 },
+        ],
+        author: 'ai',
+      },
+    );
+    const [fromId, toId] = screens.data.nodes.map((n) => n.id) as [string, string];
+    const connected = await env.api<{ created: string[] }>(
+      'POST',
+      `/api/doc/connect?id=${encodeURIComponent(docId)}`,
+      {
+        entry: fromId,
+        connections: [{ from: fromId, to: toId, label: 'Ver ejercicio' }],
+        author: 'ai',
+      },
+    );
+    expect(connected.status).toBe(200);
+    expect(connected.data.created).toHaveLength(1);
+
+    const doc = (await env.api<{ doc: DesignioDocument }>('GET', `/api/doc?id=${encodeURIComponent(docId)}`))
+      .data.doc;
+    const page = doc.pages[0]!;
+    await env.api('POST', `/api/doc/page/update?id=${encodeURIComponent(docId)}`, {
+      page: page.id,
+      summary: 'Navegación principal del catálogo',
+      author: 'ai',
+    });
+
+    const updatedDoc = (
+      await env.api<{ doc: DesignioDocument }>('GET', `/api/doc?id=${encodeURIComponent(docId)}`)
+    ).data.doc;
+    expect(updatedDoc.pages[0]!.summary).toBe('Navegación principal del catálogo');
+    const flow = analyzePageFlow(updatedDoc.pages[0]!);
+    expect(flow.edges).toContainEqual(expect.objectContaining({ fromId, toId, label: 'Ver ejercicio' }));
+
+    // Esperar al volcado a disco y comprobar que una nueva instancia recupera el historial.
+    await env.server.ctx.store.flushAll();
+    const freshStore = new DocumentStore(resolveWorkspace(env.workspace));
+    await freshStore.init();
+    const persisted = freshStore.history(docId, 5);
+    expect(persisted.length).toBeGreaterThan(0);
+    expect(persisted[0]!.label).toContain('Describió el recorrido');
+  });
+
+  it('vincula pantallas con su archivo .tsx, extrae tokens y detecta capturas desfasadas o pantallas sin cubrir', async () => {
+    // Asegurar que WorkoutScreen.tsx tiene mtime posterior a 01-inicio.png (>2s)
+    const codeFile = path.join(env.project, 'src', 'screens', 'WorkoutScreen.tsx');
+    const future = new Date(Date.now() + 10_000);
+    await fs.utimes(codeFile, future, future);
+
+    const linked = await env.api<{ nodes: { id: string }[] }>(
+      'POST',
+      `/api/doc/nodes?id=${encodeURIComponent(docId)}`,
+      {
+        nodes: [
+          {
+            type: 'image',
+            name: 'Entreno',
+            src: 'demo:capturas/01-inicio.png',
+            source: 'demo:src/screens/WorkoutScreen.tsx',
+          },
+        ],
+        author: 'ai',
+      },
+    );
+    expect(linked.status).toBe(200);
+    const nodeId = linked.data.nodes[0]!.id;
+
+    const code = await env.api<{ exists: boolean; stale?: boolean; preview?: string }>(
+      'GET',
+      '/api/projects/code?ref=demo:src/screens/WorkoutScreen.tsx&asset=demo:capturas/01-inicio.png&preview=1',
+    );
+    expect(code.status).toBe(200);
+    expect(code.data).toMatchObject({ exists: true, stale: true });
+    expect(code.data.preview).toContain('WorkoutScreen');
+
+    // Seguridad: no permite inspeccionar archivos ocultos ni escapar de la raíz
+    expect((await env.api('GET', '/api/projects/code?ref=demo:.env')).status).toBeGreaterThanOrEqual(400);
+
+    const tokens = await env.api<{
+      colors: { name: string; value: string }[];
+      metrics: { name: string; value: number }[];
+    }>('GET', '/api/projects/tokens?project=demo');
+    expect(tokens.status).toBe(200);
+    expect(tokens.data.colors).toContainEqual({ name: 'green', value: '#1C4B2B' });
+    expect(tokens.data.metrics).toContainEqual({ name: 'cardRadius', value: 20 });
+
+    const audit = await env.api<{
+      buildNumber?: number;
+      coveredScreens: string[];
+      unlinkedScreens: string[];
+      staleNodes: { id: string }[];
+    }>('GET', `/api/projects/audit?doc=${encodeURIComponent(docId)}`);
+    expect(audit.status).toBe(200);
+    expect(audit.data.buildNumber).toBe(284);
+    expect(audit.data.coveredScreens).toContain('src/screens/WorkoutScreen.tsx');
+    expect(audit.data.unlinkedScreens).toContain('src/screens/FriendsSheet.tsx');
+    expect(audit.data.staleNodes.map((s) => s.id)).toContain(nodeId);
+
+    // También detecta desfase cuando la maqueta/captura es un archivo local del documento (local:html/...)
+    const localNode = await env.api<{ nodes: { id: string; src?: string }[] }>(
+      'POST',
+      `/api/doc/nodes?id=${encodeURIComponent(docId)}`,
+      {
+        nodes: [
+          {
+            type: 'html',
+            name: 'Maqueta local vinculada',
+            html: '<p>Versión vieja</p>',
+            source: 'demo:src/screens/WorkoutScreen.tsx',
+          },
+        ],
+        author: 'ai',
+      },
+    );
+    const localNodeId = localNode.data.nodes[0]!.id;
+    const localHtmlPath = path.join(env.workspace, docId.split('/')[0]!, 'html', `${localNodeId}.html`);
+    const past = new Date(Date.now() - 20_000);
+    await fs.utimes(localHtmlPath, past, past);
+
+    const localCode = await env.api<{ stale?: boolean }>(
+      'GET',
+      `/api/projects/code?ref=demo:src/screens/WorkoutScreen.tsx&asset=local:html/${localNodeId}.html&doc=${encodeURIComponent(docId)}`,
+    );
+    expect(localCode.data.stale).toBe(true);
   });
 });

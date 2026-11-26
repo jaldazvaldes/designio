@@ -1,10 +1,13 @@
+import path from 'node:path';
 import {
   type Author,
   arrangeLayout,
   findContainer,
   findPage,
+  isSafeRelativePath,
   type NodeSpec,
   nextFreePosition,
+  normalizeRelativePath,
   normalizeSpec,
   storyIframeUrl,
 } from '@designio/core';
@@ -130,11 +133,19 @@ export async function importComponents(
     groups.set(story.title, group);
   });
 
+  const storyCwd = normalizeRelativePath(ctx.config().projects[req.project]?.storybook?.start?.cwd ?? '.');
+  const resolveStorySource = (rel?: string): string | undefined => {
+    if (!rel) return undefined;
+    const joined = normalizeRelativePath(storyCwd && storyCwd !== '.' ? path.posix.join(storyCwd, rel) : rel);
+    return isSafeRelativePath(joined) ? `${req.project}:${joined}` : undefined;
+  };
+
   const sections: NodeSpec[] = [];
   for (const [title, group] of groups) {
     const cells: NodeSpec[] = group.stories.map((story, i) => {
       const h = group.heights[i]!;
       const w = group.widths[i]!;
+      const sourceRef = resolveStorySource(story.componentPath);
       return {
         type: 'frame',
         name: story.name,
@@ -143,6 +154,7 @@ export async function importComponents(
         fill: 'transparent',
         clip: false,
         status: req.status,
+        ...(sourceRef ? { source: sourceRef } : {}),
         children: [
           {
             type: 'text',
@@ -164,6 +176,7 @@ export async function importComponents(
             w,
             h,
             viewport: { w, h },
+            ...(sourceRef ? { source: sourceRef } : {}),
             links: story.componentPath ? [{ label: 'Componente', url: story.componentPath }] : undefined,
           },
         ],

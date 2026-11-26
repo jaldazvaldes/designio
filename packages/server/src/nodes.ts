@@ -1,9 +1,12 @@
 import path from 'node:path';
 import {
+  type Author,
+  absoluteBoxes,
   arrangeLayout,
   findContainer,
   findNode,
   findPage,
+  HUMAN_ONLY_STATUSES,
   type Node,
   type NodeSpec,
   newId,
@@ -11,6 +14,8 @@ import {
   normalizeSpec,
   type Op,
   parseAssetRef,
+  STATUS_LABELS,
+  walkNodes,
 } from '@designio/core';
 import { resolveAsset, type ServerContext, workspaceFolderRoot } from './context';
 import { HttpError } from './errors';
@@ -85,16 +90,28 @@ export async function buildCreateOps(
   const container = findContainer(doc, parentId);
   if (!container) throw new HttpError(404, `No existe la página o contenedor «${parentId}»`);
   const { specs, sizes } = await prepareSpecs(ctx, entry.folder, input.nodes);
-  const nodes = specs.map((spec) => normalizeSpec(spec, { imageSize: (src) => sizes.get(src) }));
+  const page = findPage(doc, parentId) ?? findNode(doc, parentId)?.page ?? null;
+  const boxes = page ? absoluteBoxes(page) : null;
+  const parentBox = page && parentId !== page.id ? (boxes?.get(parentId) ?? { x: 0, y: 0 }) : { x: 0, y: 0 };
+  const nodes = specs.map((spec) =>
+    normalizeSpec(spec, {
+      imageSize: (src) => sizes.get(src),
+      nodeBox: (targetId) => {
+        const b = boxes?.get(targetId);
+        return b ? { x: b.x - parentBox.x, y: b.y - parentBox.y, w: b.w, h: b.h } : undefined;
+      },
+    }),
+  );
 
   // Colocación automática en la página para lo que no trae coordenadas.
-  const page = findPage(doc, parentId);
-  if (page && input.autoPlace !== false) {
-    const start = nextFreePosition(page);
+  const directPage = findPage(doc, parentId);
+  if (directPage && input.autoPlace !== false) {
+    const start = nextFreePosition(directPage);
     let cursorX = start.x;
     nodes.forEach((node, i) => {
       const spec = input.nodes[i]!;
-      if (spec.x === undefined && spec.y === undefined) {
+      const hasFlowAnchor = spec.type === 'arrow' && (spec.fromId || spec.toId || spec.from || spec.to);
+      if (spec.x === undefined && spec.y === undefined && !hasFlowAnchor) {
         node.x = cursorX;
         node.y = start.y;
         cursorX += node.w + 120;
@@ -110,6 +127,7 @@ export async function buildUpdateOps(
   ctx: ServerContext,
   docId: string,
   updates: { id: string; set: Record<string, unknown> }[],
+  author: Author = 'human',
 ): Promise<Op[]> {
   const entry = ctx.store.requireWritable(docId);
   if (!Array.isArray(updates) || updates.length === 0) throw new HttpError(400, 'Faltan cambios');
@@ -122,6 +140,17 @@ export async function buildUpdateOps(
     if ('html' in set) {
       const loc = findNode(entry.doc, update.id);
       if (loc?.node.type !== 'html') throw new HttpError(400, `«${update.id}» no es un nodo HTML`);
+      if (author === 'ai') {
+        const decided = [loc.node, ...loc.ancestors].find(
+          (n) => n.status && (HUMAN_ONLY_STATUSES as readonly string[]).includes(n.status),
+        );
+        if (decided?.status) {
+          throw new HttpError(
+            403,
+            `«${decided.name}» tiene una decisión humana (${STATUS_LABELS[decided.status]}); la IA no puede reescribir su maqueta`,
+          );
+        }
+      }
       const ref = parseAssetRef(loc.node.src);
       if (ref.kind !== 'local') {
         throw new HttpError(403, 'Ese HTML pertenece a un proyecto conectado (solo lectura); crea uno nuevo');
@@ -133,6 +162,81 @@ export async function buildUpdateOps(
     if (Object.keys(set).length > 0) ops.push({ op: 'node.update', id: update.id, set });
   }
   return ops;
+}
+
+export interface ConnectLinkInput {
+  from: string;
+  to: string;
+  label?: string;
+  color?: string;
+}
+
+export interface ConnectInput {
+  connections?: ConnectLinkInput[];
+  /** Nodo que actúa como pantalla inicial del recorrido. */
+  entry?: string;
+}
+
+export function buildConnectOps(ctx: ServerContext, docId: string, input: ConnectInput) {
+  const entry = ctx.store.requireWritable(docId);
+  const doc = entry.doc;
+  const connections = input.connections ?? [];
+  if (connections.length === 0 && !input.entry) {
+    throw new HttpError(400, 'Indica al menos una conexión o «entry»');
+  }
+  const ops: Op[] = [];
+  const created: string[] = [];
+  const updated: string[] = [];
+
+  if (input.entry) {
+    const loc = findNode(doc, input.entry);
+    if (!loc) throw new HttpError(404, `No existe el elemento «${input.entry}»`);
+    ops.push({ op: 'node.update', id: input.entry, set: { entry: true } });
+  }
+
+  for (const conn of connections) {
+    if (!conn.from || !conn.to) throw new HttpError(400, 'Cada conexión necesita «from» y «to»');
+    if (conn.from === conn.to) throw new HttpError(400, 'No se puede conectar un elemento consigo mismo');
+    const fromLoc = findNode(doc, conn.from);
+    const toLoc = findNode(doc, conn.to);
+    if (!fromLoc) throw new HttpError(404, `No existe el origen «${conn.from}»`);
+    if (!toLoc) throw new HttpError(404, `No existe el destino «${conn.to}»`);
+    if (fromLoc.page.id !== toLoc.page.id) {
+      throw new HttpError(400, `«${fromLoc.node.name}» y «${toLoc.node.name}» están en páginas distintas`);
+    }
+    const page = fromLoc.page;
+    let existingId: string | null = null;
+    walkNodes(page.children, (n) => {
+      if (n.type === 'arrow' && n.fromId === conn.from && n.toId === conn.to) existingId = n.id;
+    });
+    const labelText = conn.label?.trim();
+    if (existingId) {
+      const set: Record<string, unknown> = {
+        label: labelText ? labelText : null,
+        name: labelText || `${fromLoc.node.name} → ${toLoc.node.name}`,
+      };
+      if (conn.color) set.color = conn.color;
+      ops.push({ op: 'node.update', id: existingId, set });
+      updated.push(existingId);
+    } else {
+      const boxes = absoluteBoxes(page);
+      const arrow = normalizeSpec(
+        {
+          type: 'arrow',
+          fromId: conn.from,
+          toId: conn.to,
+          label: labelText,
+          name: labelText || `${fromLoc.node.name} → ${toLoc.node.name}`,
+          color: conn.color ?? '#1C4B2B',
+          strokeWidth: 2.2,
+        },
+        { nodeBox: (id) => boxes.get(id) },
+      );
+      ops.push({ op: 'node.create', parentId: page.id, node: arrow });
+      created.push(arrow.id);
+    }
+  }
+  return { ops, created, updated };
 }
 
 export interface ArrangeInput {

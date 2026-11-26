@@ -12,6 +12,7 @@ export interface WorkspacePaths {
   root: string;
   configFile: string;
   runtimeDir: string;
+  historyDir: string;
   serverInfoFile: string;
   rendersDir: string;
 }
@@ -23,6 +24,7 @@ export function resolveWorkspace(explicit?: string): WorkspacePaths {
     root,
     configFile: path.join(root, 'designio.config.json'),
     runtimeDir,
+    historyDir: path.join(runtimeDir, 'history'),
     serverInfoFile: path.join(runtimeDir, 'server.json'),
     rendersDir: path.join(root, '.renders'),
   };

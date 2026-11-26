@@ -215,6 +215,9 @@ export class DocumentStore extends EventEmitter {
       entry.error = undefined;
       entry.version += 1;
       this.rememberHash(entry, hash);
+      if (initial && isNew) {
+        await this.loadPersistedHistory(entry, hash);
+      }
       if (!initial && !isNew) {
         this.emitEvent({ type: 'snapshot', docId: id, version: entry.version, doc, reason: 'external' });
       }
@@ -235,6 +238,7 @@ export class DocumentStore extends EventEmitter {
     const entry = this.entries.get(id);
     if (entry) clearTimeout(entry.timer);
     this.entries.delete(id);
+    await fs.rm(this.historyFileFor(id), { force: true }).catch(() => {});
     this.emitEvent({ type: 'deleted', docId: id });
     this.emitEvent({ type: 'docs' });
   }
@@ -326,6 +330,25 @@ export class DocumentStore extends EventEmitter {
     return path.join(this.paths.root, folder, `${slug}${DOC_SUFFIX}`);
   }
 
+  private historyFileFor(id: string): string {
+    return path.join(this.paths.historyDir, `${id.replace('/', '--')}.json`);
+  }
+
+  private async loadPersistedHistory(entry: DocEntry, docHash: string): Promise<void> {
+    try {
+      const raw = JSON.parse(await fs.readFile(this.historyFileFor(entry.id), 'utf8')) as {
+        docHash?: string;
+        history?: TxRecord[];
+      };
+      if (raw.docHash !== docHash || !Array.isArray(raw.history)) return;
+      entry.history = raw.history.slice(-HISTORY_LIMIT);
+      const lastVer = entry.history[entry.history.length - 1]?.version;
+      if (typeof lastVer === 'number' && lastVer > entry.version) entry.version = lastVer;
+    } catch {
+      // Sin historial previo o archivo ilegible: se empieza limpio.
+    }
+  }
+
   apply(id: string, input: ApplyInput & { undoOf?: string }): TxRecord {
     const entry = this.requireWritable(id);
     const result = applyTransaction(entry.doc, input.ops, { author: input.author });
@@ -357,10 +380,7 @@ export class DocumentStore extends EventEmitter {
     const entry = this.requireWritable(id);
     const tx = entry.history.find((t) => t.txId === txId);
     if (!tx) {
-      throw new HttpError(
-        404,
-        `La transacción «${txId}» no está en el historial (se pierde al reiniciar el servidor).`,
-      );
+      throw new HttpError(404, `La transacción «${txId}» no está en el historial reciente del documento.`);
     }
     if (tx.undoneBy) throw new HttpError(409, `«${tx.label}» ya se deshizo.`);
     // Cadena deshacer/rehacer: profundidad impar = «deshacer», par = «rehacer».
@@ -459,8 +479,13 @@ export class DocumentStore extends EventEmitter {
         if (!entry.doc || entry.error) return;
         entry.dirty = false;
         const text = serializeDocument(entry.doc);
-        this.rememberHash(entry, hashText(text));
+        const docHash = hashText(text);
+        this.rememberHash(entry, docHash);
         await writeFileAtomic(entry.file, text);
+        await writeFileAtomic(
+          this.historyFileFor(entry.id),
+          `${JSON.stringify({ docHash, history: entry.history })}\n`,
+        ).catch(() => {});
       });
     return entry.writing;
   }

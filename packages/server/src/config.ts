@@ -31,6 +31,10 @@ const ProjectSchema = z.strictObject({
   label: z.string().optional(),
   /** Carpetas (relativas a la raíz) donde se permite exportar. Vacío = solo lectura. */
   writable: z.array(z.string()).default([]),
+  /** Archivo TS, CSS o JSON (relativo a la raíz) con los tokens visuales del proyecto. */
+  tokens: z.string().optional(),
+  /** Patrones glob (relativos a la raíz) de vistas o pantallas para auditar cobertura. */
+  screens: z.array(z.string().min(1)).optional(),
   /** Storybook del proyecto: sus historias se ven como componentes vivos en el lienzo. */
   storybook: StorybookSchema.optional(),
 });
@@ -92,6 +96,21 @@ export async function loadConfig(paths: WorkspacePaths): Promise<LoadedConfig> {
       for (const dir of project.writable) {
         if (!isSafeRelativePath(dir))
           throw new Error(`carpeta de escritura no válida en «${alias}»: «${dir}»`);
+      }
+      if (project.tokens !== undefined) {
+        project.tokens = normalizeRelativePath(project.tokens);
+        if (!isSafeRelativePath(project.tokens)) {
+          throw new Error(`ruta de tokens no válida en «${alias}»: «${project.tokens}»`);
+        }
+      }
+      if (project.screens !== undefined) {
+        project.screens = project.screens.map((pattern) => {
+          const norm = pattern.replace(/\\/g, '/').trim();
+          if (!norm || norm.startsWith('/') || norm.split('/').some((seg) => seg === '..')) {
+            throw new Error(`patrón de vistas no válido en «${alias}»: «${pattern}»`);
+          }
+          return norm;
+        });
       }
     }
     return { config };

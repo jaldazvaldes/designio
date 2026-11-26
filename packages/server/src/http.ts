@@ -31,14 +31,17 @@ import {
   agentOf,
   describeArrange,
   describeComment,
+  describeConnect,
   describeCreate,
   describeDelete,
+  describePageUpdate,
   describeReply,
   describeUpdate,
 } from './labels';
-import { buildArrangeOps, buildCreateOps, buildUpdateOps } from './nodes';
+import { buildArrangeOps, buildConnectOps, buildCreateOps, buildUpdateOps } from './nodes';
 import { isInside, VERSION, WEB_DIST } from './paths';
 import { writeFileAtomic } from './persist';
+import { auditProjectCoverage, extractProjectTokens, inspectProjectSource } from './project-intel';
 import { mainGuard, sandboxGuard } from './security';
 import type { StoreEvent } from './store';
 
@@ -272,6 +275,7 @@ export async function createMainApp(ctx: ServerContext, options: { extraOrigins:
         root: p.root,
         exists: existsSync(p.root),
         writable: p.writable,
+        tokens: p.tokens ?? null,
         storybook: p.storybook
           ? {
               url: p.storybook.url,
@@ -369,13 +373,14 @@ export async function createMainApp(ctx: ServerContext, options: { extraOrigins:
       label?: string;
       author?: string;
     }>(request);
+    const author = authorOf(b.author);
     const label = b.label || describeUpdate(ctx.store.require(id).doc, b.updates ?? []);
-    const ops = await buildUpdateOps(ctx, id, b.updates ?? []);
+    const ops = await buildUpdateOps(ctx, id, b.updates ?? [], author);
     if (ops.length === 0) return { txId: null, version: ctx.store.require(id).version };
     const tx = ctx.store.apply(id, {
       ops,
       label,
-      author: authorOf(b.author),
+      author,
       agent: agentOf(request),
     });
     return { txId: tx.txId, version: tx.version };
@@ -410,15 +415,76 @@ export async function createMainApp(ctx: ServerContext, options: { extraOrigins:
 
   app.post('/api/doc/page', async (request) => {
     const id = required(q(request).id, 'id');
-    const b = body<{ name?: string; author?: string }>(request);
+    const b = body<{ name?: string; summary?: string; author?: string }>(request);
     const pageId = newId();
+    const summary = b.summary?.trim();
     const tx = ctx.store.apply(id, {
-      ops: [{ op: 'page.create', page: { id: pageId, name: b.name || 'Página nueva', children: [] } }],
+      ops: [
+        {
+          op: 'page.create',
+          page: {
+            id: pageId,
+            name: b.name || 'Página nueva',
+            ...(summary ? { summary } : {}),
+            children: [],
+          },
+        },
+      ],
       label: `Creó la página «${b.name || 'Página nueva'}»`,
       author: authorOf(b.author),
       agent: agentOf(request),
     });
     return { txId: tx.txId, version: tx.version, pageId };
+  });
+
+  app.post('/api/doc/page/update', async (request) => {
+    const id = required(q(request).id, 'id');
+    const b = body<{
+      page?: string;
+      name?: string;
+      summary?: string | null;
+      background?: string | null;
+      label?: string;
+      author?: string;
+    }>(request);
+    const entry = ctx.store.requireWritable(id);
+    const pageId = required(b.page, 'page');
+    const page = findPage(entry.doc, pageId);
+    if (!page) throw new HttpError(404, `No existe la página «${pageId}»`);
+    const set: Record<string, unknown> = {};
+    if (b.name !== undefined) set.name = b.name.trim();
+    if (b.summary !== undefined) set.summary = b.summary?.trim() ? b.summary.trim() : null;
+    if (b.background !== undefined) set.background = b.background;
+    if (Object.keys(set).length === 0) throw new HttpError(400, 'Indica algún cambio para la página');
+    const tx = ctx.store.apply(id, {
+      ops: [{ op: 'page.update', id: pageId, set }],
+      label: b.label || describePageUpdate(page.name, set),
+      author: authorOf(b.author),
+      agent: agentOf(request),
+    });
+    return { txId: tx.txId, version: tx.version };
+  });
+
+  app.post('/api/doc/connect', async (request) => {
+    const id = required(q(request).id, 'id');
+    const b = body<{
+      connections?: { from: string; to: string; label?: string; color?: string }[];
+      entry?: string;
+      label?: string;
+      author?: string;
+    }>(request);
+    const docBefore = ctx.store.require(id).doc;
+    const { ops, created, updated } = buildConnectOps(ctx, id, {
+      connections: b.connections,
+      entry: b.entry,
+    });
+    const tx = ctx.store.apply(id, {
+      ops,
+      label: b.label || describeConnect(docBefore, b.connections ?? [], b.entry),
+      author: authorOf(b.author),
+      agent: agentOf(request),
+    });
+    return { txId: tx.txId, version: tx.version, created, updated };
   });
 
   app.post('/api/doc/undo', async (request) => {
@@ -531,6 +597,26 @@ export async function createMainApp(ctx: ServerContext, options: { extraOrigins:
     const query = q(request);
     const root = projectRoot(ctx.config(), required(query.project, 'project'));
     return listFiles(root, query.glob || '**/*', { limit: numberParam(query.limit, 200), withSizes: true });
+  });
+
+  app.get('/api/projects/code', async (request) => {
+    const query = q(request);
+    return inspectProjectSource(
+      ctx,
+      required(query.ref, 'ref'),
+      query.asset,
+      query.preview === '1' || query.preview === 'true',
+      query.doc,
+    );
+  });
+
+  app.get('/api/projects/tokens', async (request) => {
+    return extractProjectTokens(ctx, required(q(request).project, 'project'));
+  });
+
+  app.get('/api/projects/audit', async (request) => {
+    const query = q(request);
+    return auditProjectCoverage(ctx, required(query.doc, 'doc'), query.project);
   });
 
   app.get('/api/projects/stories', async (request) => {
