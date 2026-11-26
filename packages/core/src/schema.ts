@@ -51,6 +51,10 @@ export interface NodeBase {
   note?: string;
   tags?: string[];
   links?: Link[];
+  /** Archivo de código fuente del proyecto que implementa este elemento («alias:ruta/Componente.tsx»). */
+  source?: string;
+  /** Marca este elemento como pantalla inicial del recorrido de la página. */
+  entry?: boolean;
 }
 
 export interface FrameNode extends NodeBase {
@@ -120,6 +124,11 @@ export interface ArrowNode extends NodeBase {
   type: 'arrow';
   /** Inicio y fin, relativos a la esquina superior izquierda del nodo. */
   points: [Point, Point];
+  /** Nodo origen y destino en la misma página (si están, la flecha sigue a ambos al moverlos). */
+  fromId?: string;
+  toId?: string;
+  /** Acción o condición humana que explica el paso («Pulsar Guardar», «Sin conexión»…). */
+  label?: string;
   color?: string;
   strokeWidth?: number;
   head?: 'end' | 'start' | 'both' | 'none';
@@ -162,6 +171,8 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
 export interface Page {
   id: string;
   name: string;
+  /** Explicación en lenguaje humano de qué enseña esta página o cómo se recorre. */
+  summary?: string;
   background?: string;
   children: Node[];
 }
@@ -234,6 +245,8 @@ const base = {
   note: z.string().optional(),
   tags: z.array(z.string()).optional(),
   links: z.array(LinkSchema).optional(),
+  source: z.string().min(1).max(500).optional(),
+  entry: z.boolean().optional(),
 };
 
 const paint = {
@@ -318,6 +331,9 @@ const ArrowSchema = z.strictObject({
   ...base,
   type: z.literal('arrow'),
   points: z.tuple([PointSchema, PointSchema]),
+  fromId: id().optional(),
+  toId: id().optional(),
+  label: z.string().max(200).optional(),
   color: color().optional(),
   strokeWidth: nonNeg().optional(),
   head: z.enum(['end', 'start', 'both', 'none']).optional(),
@@ -326,6 +342,7 @@ const ArrowSchema = z.strictObject({
 export const PageSchema: z.ZodType<Page> = z.strictObject({
   id: id(),
   name: z.string().max(300),
+  summary: z.string().max(2000).optional(),
   background: color().optional(),
   children: z.array(NodeSchema),
 });

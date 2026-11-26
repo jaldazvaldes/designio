@@ -1,9 +1,11 @@
 import { fileBaseName, parseAssetRef } from './assets';
+import { connectorCurve } from './flow';
 import { newId } from './ids';
 import { fitWithin } from './layout';
 import { getPreset } from './presets';
 import type { Node, NodeType, Point } from './schema';
 import { isContainer, NODE_TYPE_LABELS, NODE_TYPES, parseNode, ValidationError } from './schema';
+import type { Box } from './tree';
 
 /**
  * Especificación parcial de un nodo (lo que envían la IA o la interfaz).
@@ -28,6 +30,8 @@ export interface NodeSpec {
 export interface SpecContext {
   /** Tamaño natural (px) de una imagen, si se conoce. */
   imageSize?: (src: string) => { w: number; h: number } | undefined;
+  /** Caja de un nodo existente (en coordenadas del contenedor padre), para conectar flechas. */
+  nodeBox?: (id: string) => Box | undefined;
 }
 
 const MAX_DEFAULT_IMAGE_SIDE = 1200;
@@ -155,16 +159,25 @@ export function normalizeSpec(spec: NodeSpec, ctx: SpecContext = {}): Node {
       break;
     }
     case 'arrow': {
-      if (from && to) {
-        const x = Math.min(from.x, to.x);
-        const y = Math.min(from.y, to.y);
+      const fromBox = typeof spec.fromId === 'string' ? ctx.nodeBox?.(spec.fromId) : undefined;
+      const toBox = typeof spec.toId === 'string' ? ctx.nodeBox?.(spec.toId) : undefined;
+      let pA = from;
+      let pB = to;
+      if (!pA && !pB && fromBox && toBox) {
+        const curve = connectorCurve(fromBox, toBox);
+        pA = { x: Math.round(curve.start.x), y: Math.round(curve.start.y) };
+        pB = { x: Math.round(curve.end.x), y: Math.round(curve.end.y) };
+      }
+      if (pA && pB) {
+        const x = Math.min(pA.x, pB.x);
+        const y = Math.min(pA.y, pB.y);
         out.x = x;
         out.y = y;
-        out.w = Math.abs(to.x - from.x);
-        out.h = Math.abs(to.y - from.y);
+        out.w = Math.abs(pB.x - pA.x);
+        out.h = Math.abs(pB.y - pA.y);
         out.points = [
-          { x: from.x - x, y: from.y - y },
-          { x: to.x - x, y: to.y - y },
+          { x: pA.x - x, y: pA.y - y },
+          { x: pB.x - x, y: pB.y - y },
         ];
       } else {
         out.w = spec.w ?? 100;
@@ -174,9 +187,22 @@ export function normalizeSpec(spec: NodeSpec, ctx: SpecContext = {}): Node {
           { x: out.w as number, y: out.h as number },
         ];
       }
-      out.name = spec.name ?? NODE_TYPE_LABELS.arrow;
+      const labelText = typeof spec.label === 'string' ? spec.label.trim() : '';
+      if (labelText) out.label = labelText;
+      else delete out.label;
+      out.name = spec.name ?? (labelText || NODE_TYPE_LABELS.arrow);
       break;
     }
+  }
+  if (typeof out.source === 'string') {
+    const srcRef = parseAssetRef(out.source);
+    if (srcRef.kind !== 'project') {
+      throw new ValidationError(
+        '«source» debe apuntar a un proyecto conectado («alias:ruta/archivo.tsx»)',
+        [],
+      );
+    }
+    out.source = `${srcRef.project}:${srcRef.path}`;
   }
   if ('html' in out) {
     throw new ValidationError(

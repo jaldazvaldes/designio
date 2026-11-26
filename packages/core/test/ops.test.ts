@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  analyzePageFlow,
   applyTransaction,
+  connectorCurve,
   createEmptyDocument,
   type DesignioDocument,
+  describePageFlow,
   findNode,
   migrateDocument,
   type Node,
+  normalizeSpec,
   type Op,
   OpError,
   parseDocument,
@@ -66,10 +70,18 @@ describe('operaciones e inversas', () => {
   it('páginas y comentarios', () => {
     const doc = baseDoc();
     const withPage = roundTrip(doc, [
-      { op: 'page.create', page: { id: 'p2', name: 'Dos', children: [rect('r9')] } },
-      { op: 'page.update', id: 'p2', set: { name: 'Segunda', background: '#eee' } },
+      {
+        op: 'page.create',
+        page: { id: 'p2', name: 'Dos', summary: 'Flujo principal', children: [rect('r9')] },
+      },
+      { op: 'page.update', id: 'p2', set: { name: 'Segunda', background: '#eee', summary: 'Actualizado' } },
     ]);
-    expect(withPage.doc.pages[1]).toMatchObject({ id: 'p2', name: 'Segunda', background: '#eee' });
+    expect(withPage.doc.pages[1]).toMatchObject({
+      id: 'p2',
+      name: 'Segunda',
+      background: '#eee',
+      summary: 'Actualizado',
+    });
 
     const comment = {
       id: 'c1',
@@ -187,6 +199,25 @@ describe('decisiones humanas', () => {
         author: 'ai',
       }),
     ).not.toThrow();
+    // Pero no alterar su apariencia, tamaño o contenido, ni el interior de un contenedor aprobado.
+    expect(() =>
+      applyTransaction(decided, [{ op: 'node.update', id: 'r1', set: { fill: '#000', w: 999 } }], {
+        author: 'ai',
+      }),
+    ).toThrow(/solo puede moverlo o anotarlo/);
+    const approvedFrame = applyTransaction(
+      baseDoc(),
+      [{ op: 'node.update', id: 'f1', set: { status: 'approved' } }],
+      { author: 'human' },
+    ).doc;
+    expect(() =>
+      applyTransaction(approvedFrame, [{ op: 'node.delete', id: 'r2' }], { author: 'ai' }),
+    ).toThrow(/decisión humana/);
+    expect(() =>
+      applyTransaction(approvedFrame, [{ op: 'node.create', parentId: 'f1', node: rect('r99') }], {
+        author: 'ai',
+      }),
+    ).toThrow(/decisión humana/);
     expect(() =>
       applyTransaction(decided, [{ op: 'node.delete', id: 'f1' }], { author: 'human' }),
     ).not.toThrow();
@@ -227,5 +258,39 @@ describe('documento', () => {
   it('abre documentos del formato anterior (cuando la app se llamaba «diseñio»)', () => {
     const legacy = { ...baseDoc(), schema: 'dise' + 'nio/1' };
     expect(parseDocument(migrateDocument(legacy)).schema).toBe('designio/1');
+  });
+
+  it('analiza el flujo de navegación humano y calcula curvas entre pantallas', () => {
+    const doc = createEmptyDocument('App');
+    const page = doc.pages[0]!;
+    page.summary = 'Del entreno activo al cierre';
+    const s1 = frame('s1', [], { name: 'Entreno', x: 0, y: 0, w: 360, h: 780, entry: true });
+    const s2 = frame('s2', [], { name: 'Elegir ejercicio', x: 500, y: 0, w: 360, h: 780 });
+    const s3 = frame('s3', [], { name: 'Resumen', x: 1000, y: 0, w: 360, h: 780 });
+    const a1 = normalizeSpec(
+      { type: 'arrow', id: 'a1', fromId: 's1', toId: 's2', label: '+ A mano' },
+      { nodeBox: (id) => (id === 's1' ? s1 : s2) },
+    );
+    const a2 = normalizeSpec(
+      { type: 'arrow', id: 'a2', fromId: 's2', toId: 's3', label: 'Terminar' },
+      { nodeBox: (id) => (id === 's2' ? s2 : s3) },
+    );
+    page.children = [s1, s2, s3, a1, a2];
+    expect(() => parseDocument(doc)).not.toThrow();
+
+    const flow = analyzePageFlow(page);
+    expect(flow.entries.map((e) => e.id)).toEqual(['s1']);
+    expect(flow.steps.map((s) => s.name)).toEqual(['Entreno', 'Elegir ejercicio', 'Resumen']);
+    expect(flow.outgoing.get('s1')?.[0]?.label).toBe('+ A mano');
+    expect(flow.incoming.get('s3')?.[0]?.fromName).toBe('Elegir ejercicio');
+
+    const desc = describePageFlow(page);
+    expect(desc.join('\n')).toContain('«Entreno» #s1 ──[+ A mano]──▶ «Elegir ejercicio» #s2');
+
+    const curve = connectorCurve(s1, s2);
+    expect(curve.sideA).toBe('right');
+    expect(curve.sideB).toBe('left');
+    expect(curve.mid.x).toBeGreaterThan(360);
+    expect(curve.mid.x).toBeLessThan(500);
   });
 });

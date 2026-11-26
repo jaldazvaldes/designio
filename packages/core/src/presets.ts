@@ -24,6 +24,22 @@ export const DEVICE_PRESETS: Record<string, DevicePreset> = {
     radius: 20,
   },
   'iphone-15': { id: 'iphone-15', label: 'iPhone 15 · 1179×2556', w: 393, h: 852, scale: 3, radius: 48 },
+  'mobile-320': {
+    id: 'mobile-320',
+    label: 'Móvil compacto · 640×1136',
+    w: 320,
+    h: 568,
+    scale: 2,
+    radius: 20,
+  },
+  'wear-round': {
+    id: 'wear-round',
+    label: 'Reloj redondo · 454×454',
+    w: 227,
+    h: 227,
+    scale: 2,
+    radius: 114,
+  },
   'tablet-800': { id: 'tablet-800', label: 'Tablet · 800×1280', w: 800, h: 1280, scale: 2, radius: 24 },
   'desktop-1280': {
     id: 'desktop-1280',

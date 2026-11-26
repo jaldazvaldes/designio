@@ -148,6 +148,25 @@ function assertNoHumanDecision(nodes: Node[], action: 'crear' | 'borrar'): void 
   });
 }
 
+/** Propiedades inocuas que la IA sí puede ajustar en un nodo ya decidido por una persona. */
+const AI_ALLOWED_ON_DECIDED = new Set(['x', 'y', 'note', 'links', 'tags', 'entry', 'source']);
+
+function assertAiUpdateAllowed(node: Node, ancestors: readonly Node[], set: Record<string, unknown>): void {
+  if ('status' in set) assertAiStatusChange(node, set.status);
+  const decided = isHumanStatus(node.status)
+    ? node
+    : (ancestors.find((a) => isHumanStatus(a.status)) ?? null);
+  if (!decided) return;
+  for (const [key, value] of Object.entries(set)) {
+    if (value === undefined || key === 'status') continue;
+    // Si está dentro de un contenedor aprobado/rechazado, ni siquiera mover hijos internos sin permiso.
+    if (decided !== node || !AI_ALLOWED_ON_DECIDED.has(key)) {
+      throw new OpError(
+        `«${decided.name}» tiene una decisión humana (${statusLabel(decided.status)}); la IA solo puede moverlo o anotarlo (no cambiar «${key}»)`,
+      );
+    }
+  }
+}
 function assertAiStatusChange(node: Node, next: unknown): void {
   if (isHumanStatus(node.status)) {
     throw new OpError(
@@ -196,6 +215,17 @@ function applyOp(doc: DesignioDocument, op: Op, options: ApplyOptions, touched: 
     case 'node.create': {
       const parent = findContainer(doc, op.parentId);
       if (!parent) throw new OpError(`no existe la página o contenedor «${op.parentId}»`);
+      if (ai) {
+        const parentLoc = findNode(doc, op.parentId);
+        const decided = parentLoc
+          ? [parentLoc.node, ...parentLoc.ancestors].find((n) => isHumanStatus(n.status))
+          : undefined;
+        if (decided) {
+          throw new OpError(
+            `«${decided.name}» tiene una decisión humana (${statusLabel(decided.status)}); la IA no puede alterar su contenido`,
+          );
+        }
+      }
       const node = parseNode(op.node);
       assertFreeIds(doc, subtreeIds(node));
       if (ai) assertNoHumanDecision([node], 'crear');
@@ -206,7 +236,7 @@ function applyOp(doc: DesignioDocument, op: Op, options: ApplyOptions, touched: 
     }
     case 'node.update': {
       const loc = requireNode(doc, op.id);
-      if (ai && 'status' in op.set) assertAiStatusChange(loc.node, op.set.status);
+      if (ai) assertAiUpdateAllowed(loc.node, loc.ancestors, op.set);
       const { next, prev } = patch(loc.node as unknown as Record<string, unknown>, op.set, null, [
         'id',
         'type',
@@ -218,7 +248,15 @@ function applyOp(doc: DesignioDocument, op: Op, options: ApplyOptions, touched: 
     }
     case 'node.delete': {
       const loc = requireNode(doc, op.id);
-      if (ai) assertNoHumanDecision([loc.node], 'borrar');
+      if (ai) {
+        assertNoHumanDecision([loc.node], 'borrar');
+        const decidedAncestor = loc.ancestors.find((a) => isHumanStatus(a.status));
+        if (decidedAncestor) {
+          throw new OpError(
+            `«${decidedAncestor.name}» tiene una decisión humana (${statusLabel(decidedAncestor.status)}); la IA no puede borrar elementos de su interior`,
+          );
+        }
+      }
       loc.parent.children.splice(loc.index, 1);
       return [{ op: 'node.create', parentId: loc.parent.id, index: loc.index, node: loc.node }];
     }
@@ -249,7 +287,7 @@ function applyOp(doc: DesignioDocument, op: Op, options: ApplyOptions, touched: 
       const { next, prev } = patch(
         page as unknown as Record<string, unknown>,
         op.set,
-        ['name', 'background'],
+        ['name', 'background', 'summary'],
         [],
       );
       doc.pages[index] = parsePage(next);
