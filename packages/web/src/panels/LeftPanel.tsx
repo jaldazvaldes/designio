@@ -1,4 +1,11 @@
-import { type DesignioDocument, NODE_TYPE_LABELS, type Node, newId, type Page } from '@designio/core';
+import {
+  analyzePageFlow,
+  type DesignioDocument,
+  NODE_TYPE_LABELS,
+  type Node,
+  newId,
+  type Page,
+} from '@designio/core';
 import { createContext, useContext, useMemo, useState } from 'react';
 import { pageBoxes } from '../canvas/geometry';
 import { useDoc } from '../stores/doc';
@@ -25,6 +32,7 @@ function LayerRow({ node, depth, parentId }: { node: Node; depth: number; parent
   const isContainer = node.type === 'frame' || node.type === 'group';
   const open = isContainer && (expandedFlag ?? (depth === 0 || reveal.has(node.id)));
   const isStory = node.type === 'html' && node.src.startsWith('story:');
+  const isFlowArrow = node.type === 'arrow' && !!(node.fromId && node.toId);
 
   const commit = (set: Record<string, unknown>, label: string) =>
     void useDoc.getState().commit([{ op: 'node.update', id: node.id, set }], label);
@@ -58,7 +66,7 @@ function LayerRow({ node, depth, parentId }: { node: Node; depth: number; parent
           {open ? '▾' : '▸'}
         </button>
         <span className={`layer-icon t-${node.type}`} title={NODE_TYPE_LABELS[node.type]}>
-          {isStory ? '◈' : ICONS[node.type]}
+          {isStory ? '◈' : isFlowArrow ? '↝' : ICONS[node.type]}
         </span>
         {renaming ? (
           <input
@@ -81,7 +89,10 @@ function LayerRow({ node, depth, parentId }: { node: Node; depth: number; parent
             }}
           />
         ) : (
-          <span className="layer-name">{node.name || NODE_TYPE_LABELS[node.type]}</span>
+          <span className="layer-name">
+            {node.entry ? '★ ' : ''}
+            {node.name || NODE_TYPE_LABELS[node.type]}
+          </span>
         )}
         {node.status && <span className={`dot s-${node.status}`} title={node.status} />}
         <span className="layer-actions">
@@ -161,39 +172,43 @@ export function LeftPanel({ doc, page }: { doc: DesignioDocument; page: Page }) 
           </button>
         </header>
         <div className="pages">
-          {doc.pages.map((p) => (
-            <div
-              key={p.id}
-              className={`page-row${p.id === page.id ? ' is-active' : ''}`}
-              onClick={() => useUi.getState().set({ pageId: p.id, selection: [], focusId: null })}
-              onDoubleClick={() => setRenamingPage(p.id)}
-            >
-              {renamingPage === p.id ? (
-                <input
-                  // biome-ignore lint/a11y/noAutofocus: renombrado explícito
-                  autoFocus
-                  defaultValue={p.name}
-                  onBlur={(e) => {
-                    setRenamingPage(null);
-                    if (e.target.value.trim() && e.target.value !== p.name) {
-                      void useDoc
-                        .getState()
-                        .commit(
-                          [{ op: 'page.update', id: p.id, set: { name: e.target.value.trim() } }],
-                          `Renombraste la página como «${e.target.value.trim()}»`,
-                        );
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                  }}
-                />
-              ) : (
-                <span>{p.name}</span>
-              )}
-              <small>{p.children.length}</small>
-            </div>
-          ))}
+          {doc.pages.map((p) => {
+            const edges = analyzePageFlow(p).edges.length;
+            return (
+              <div
+                key={p.id}
+                className={`page-row${p.id === page.id ? ' is-active' : ''}`}
+                title={p.summary ?? p.name}
+                onClick={() => useUi.getState().set({ pageId: p.id, selection: [], focusId: null })}
+                onDoubleClick={() => setRenamingPage(p.id)}
+              >
+                {renamingPage === p.id ? (
+                  <input
+                    // biome-ignore lint/a11y/noAutofocus: renombrado explícito
+                    autoFocus
+                    defaultValue={p.name}
+                    onBlur={(e) => {
+                      setRenamingPage(null);
+                      if (e.target.value.trim() && e.target.value !== p.name) {
+                        void useDoc
+                          .getState()
+                          .commit(
+                            [{ op: 'page.update', id: p.id, set: { name: e.target.value.trim() } }],
+                            `Renombraste la página como «${e.target.value.trim()}»`,
+                          );
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    }}
+                  />
+                ) : (
+                  <span>{p.name}</span>
+                )}
+                <small>{edges > 0 ? `${edges} ↝` : p.children.length}</small>
+              </div>
+            );
+          })}
         </div>
       </section>
       <section className="panel-section grow">

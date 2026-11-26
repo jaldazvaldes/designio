@@ -7,7 +7,7 @@ export interface Camera {
   z: number;
 }
 
-export type Tool = 'select' | 'hand' | 'comment';
+export type Tool = 'select' | 'hand' | 'frame' | 'rect' | 'text' | 'connect' | 'comment';
 
 export interface Composer {
   pageId: string;
@@ -15,6 +15,17 @@ export interface Composer {
   /** Relativas al nodo (si hay) o a la página. */
   x: number;
   y: number;
+}
+
+export interface DraftBox {
+  kind: 'frame' | 'rect';
+  box: Box;
+}
+
+export interface DraftLink {
+  fromId: string;
+  to: { x: number; y: number };
+  hoverTargetId: string | null;
 }
 
 interface UiState {
@@ -28,10 +39,15 @@ interface UiState {
   /** Nodo HTML con el que se interactúa (los eventos pasan al iframe). */
   interactiveId: string | null;
   tool: Tool;
+  /** Preset elegido para crear marcos de un clic con la herramienta Marco (vacío = libre). */
+  framePreset: string;
+  leftCollapsed: boolean;
   spaceDown: boolean;
   drag: { ids: string[]; dx: number; dy: number } | null;
   resize: { id: string; box: Box } | null;
   marquee: Box | null;
+  draftBox: DraftBox | null;
+  draftLink: DraftLink | null;
   composer: Composer | null;
   activeCommentId: string | null;
   showResolved: boolean;
@@ -51,10 +67,14 @@ export const useUi = create<UiState>((set, get) => ({
   focusId: null,
   interactiveId: null,
   tool: 'select',
+  framePreset: 'galaxy-s24',
+  leftCollapsed: false,
   spaceDown: false,
   drag: null,
   resize: null,
   marquee: null,
+  draftBox: null,
+  draftLink: null,
   composer: null,
   activeCommentId: null,
   showResolved: false,

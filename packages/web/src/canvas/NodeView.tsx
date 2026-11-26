@@ -2,6 +2,7 @@ import {
   type ArrowNode,
   assetUrl,
   type Box,
+  connectorCurve,
   type HtmlNode,
   type ImageNode,
   type Node,
@@ -22,6 +23,7 @@ import { SANDBOX_ORIGIN } from '../api';
 import { useDoc } from '../stores/doc';
 import { useStatus } from '../stores/status';
 import { type Camera, useUi } from '../stores/ui';
+import type { PageBoxes } from './geometry';
 
 export interface RenderMode {
   render: boolean;
@@ -31,6 +33,7 @@ export interface RenderMode {
 }
 
 export const RenderContext = createContext<RenderMode>({ render: false, folder: '', track() {}, warn() {} });
+export const PageBoxesContext = createContext<PageBoxes | null>(null);
 
 /** Contenido de nodo HTML visible en pantalla (si no, se congela para ahorrar recursos). */
 function isOnScreen(
@@ -45,7 +48,7 @@ function isOnScreen(
   const sy = y * cam.z + cam.y;
   const sw = w * cam.z;
   const sh = h * cam.z;
-  if (sw < 48 || sh < 32) return false;
+  if (sw < 92 || sh < 56) return false;
   const mx = viewport.w * 0.5;
   const my = viewport.h * 0.5;
   return sx + sw > -mx && sx < viewport.w + mx && sy + sh > -my && sy < viewport.h + my;
@@ -269,8 +272,11 @@ const HtmlView = memo(function HtmlView({
   if (!visible) {
     return (
       <div className="n-frozen">
-        <span>{isStory ? 'Componente' : 'Página'}</span>
-        <small>{node.name}</small>
+        <span className="n-frozen-badge">{isStory ? '◈ Componente' : '</> Maqueta'}</span>
+        <strong>{node.name}</strong>
+        <small>
+          {vw} × {vh} · acerca el zoom para cargarlo
+        </small>
       </div>
     );
   }
@@ -300,41 +306,157 @@ const HtmlView = memo(function HtmlView({
   );
 });
 
-function ArrowView({ node, w, h }: { node: ArrowNode; w: number; h: number }) {
-  const sx = node.w ? w / node.w : 1;
-  const sy = node.h ? h / node.h : 1;
-  const [a, b] = node.points;
-  const color = node.color ?? '#1E1E1E';
+function liveEndpointBox(
+  boxes: PageBoxes | null,
+  id: string | undefined,
+  drag: { ids: string[]; dx: number; dy: number } | null,
+  resize: { id: string; box: Box } | null,
+): Box | null {
+  if (!boxes || !id) return null;
+  const b = boxes.get(id);
+  if (!b) return null;
+  if (resize?.id === id) {
+    const parent = b.parentId ? boxes.get(b.parentId) : null;
+    return {
+      x: (parent?.x ?? 0) + resize.box.x,
+      y: (parent?.y ?? 0) + resize.box.y,
+      w: resize.box.w,
+      h: resize.box.h,
+    };
+  }
+  if (drag) {
+    let cur: string | null = id;
+    while (cur) {
+      if (drag.ids.includes(cur)) return { x: b.x + drag.dx, y: b.y + drag.dy, w: b.w, h: b.h };
+      cur = boxes.get(cur)?.parentId ?? null;
+    }
+  }
+  return b;
+}
+
+function ArrowView({
+  node,
+  w,
+  h,
+  absX,
+  absY,
+}: {
+  node: ArrowNode;
+  w: number;
+  h: number;
+  absX: number;
+  absY: number;
+}) {
+  const boxes = useContext(PageBoxesContext);
+  const hasEndpoints = !!(node.fromId && node.toId);
+  const motion = useUi(
+    useShallow((s) => (hasEndpoints ? { drag: s.drag, resize: s.resize } : { drag: null, resize: null })),
+  );
+  const fromBox = hasEndpoints ? liveEndpointBox(boxes, node.fromId, motion.drag, motion.resize) : null;
+  const toBox = hasEndpoints ? liveEndpointBox(boxes, node.toId, motion.drag, motion.resize) : null;
+
+  const color = node.color ?? '#1C4B2B';
   const stroke = node.strokeWidth ?? 2;
   const head = node.head ?? 'end';
   const markerId = `m-${node.id}`;
+
+  if (fromBox && toBox) {
+    const localA: Box = { x: fromBox.x - absX, y: fromBox.y - absY, w: fromBox.w, h: fromBox.h };
+    const localB: Box = { x: toBox.x - absX, y: toBox.y - absY, w: toBox.w, h: toBox.h };
+    const curve = connectorCurve(localA, localB);
+    return (
+      <>
+        <svg className="n-arrow is-connector" width={1} height={1} overflow="visible" aria-hidden>
+          <defs>
+            <marker
+              id={markerId}
+              viewBox="0 0 10 10"
+              refX="8.5"
+              refY="5"
+              markerWidth="6.5"
+              markerHeight="6.5"
+              orient="auto-start-reverse"
+            >
+              <path d="M0,0.5 L10,5 L0,9.5 z" fill={color} />
+            </marker>
+          </defs>
+          <path
+            d={curve.path}
+            fill="none"
+            stroke="transparent"
+            strokeWidth={16}
+            style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
+          />
+          <path
+            d={curve.path}
+            fill="none"
+            stroke={color}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+            markerEnd={head === 'end' || head === 'both' ? `url(#${markerId})` : undefined}
+            markerStart={head === 'start' || head === 'both' ? `url(#${markerId})` : undefined}
+          />
+        </svg>
+        {node.label && (
+          <div
+            className="n-arrow-label"
+            style={{ left: curve.mid.x, top: curve.mid.y, borderColor: color, color }}
+          >
+            {node.label}
+          </div>
+        )}
+      </>
+    );
+  }
+
+  const sx = node.w ? w / node.w : 1;
+  const sy = node.h ? h / node.h : 1;
+  const [a, b] = node.points;
+  const midX = (a.x * sx + b.x * sx) / 2;
+  const midY = (a.y * sy + b.y * sy) / 2;
   return (
-    <svg className="n-arrow" width={Math.max(w, 1)} height={Math.max(h, 1)} overflow="visible" aria-hidden>
-      <defs>
-        <marker
-          id={markerId}
-          viewBox="0 0 10 10"
-          refX="8"
-          refY="5"
-          markerWidth="6"
-          markerHeight="6"
-          orient="auto-start-reverse"
-        >
-          <path d="M0,0 L10,5 L0,10 z" fill={color} />
-        </marker>
-      </defs>
-      <line
-        x1={a.x * sx}
-        y1={a.y * sy}
-        x2={b.x * sx}
-        y2={b.y * sy}
-        stroke={color}
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        markerEnd={head === 'end' || head === 'both' ? `url(#${markerId})` : undefined}
-        markerStart={head === 'start' || head === 'both' ? `url(#${markerId})` : undefined}
-      />
-    </svg>
+    <>
+      <svg className="n-arrow" width={Math.max(w, 1)} height={Math.max(h, 1)} overflow="visible" aria-hidden>
+        <defs>
+          <marker
+            id={markerId}
+            viewBox="0 0 10 10"
+            refX="8"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path d="M0,0 L10,5 L0,10 z" fill={color} />
+          </marker>
+        </defs>
+        <line
+          x1={a.x * sx}
+          y1={a.y * sy}
+          x2={b.x * sx}
+          y2={b.y * sy}
+          stroke="transparent"
+          strokeWidth={14}
+          style={{ pointerEvents: 'stroke' }}
+        />
+        <line
+          x1={a.x * sx}
+          y1={a.y * sy}
+          x2={b.x * sx}
+          y2={b.y * sy}
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          markerEnd={head === 'end' || head === 'both' ? `url(#${markerId})` : undefined}
+          markerStart={head === 'start' || head === 'both' ? `url(#${markerId})` : undefined}
+        />
+      </svg>
+      {node.label && (
+        <div className="n-arrow-label" style={{ left: midX, top: midY, borderColor: color, color }}>
+          {node.label}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -433,8 +555,12 @@ export const NodeView = memo(function NodeView({ node, ox, oy }: { node: Node; o
       );
     case 'arrow':
       return (
-        <div data-node-id={node.id} className="n n-arrowbox" style={base}>
-          <ArrowView node={node} w={w} h={h} />
+        <div
+          data-node-id={node.id}
+          className="n n-arrowbox"
+          style={{ ...base, pointerEvents: node.fromId && node.toId ? 'none' : undefined }}
+        >
+          <ArrowView node={node} w={w} h={h} absX={absX} absY={absY} />
         </div>
       );
   }

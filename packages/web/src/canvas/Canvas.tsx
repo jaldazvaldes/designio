@@ -1,9 +1,19 @@
-import { type Box, findNode, intersects, type Node, type Op, type Page } from '@designio/core';
+import {
+  type Box,
+  findNode,
+  getPreset,
+  intersects,
+  type Node,
+  normalizeSpec,
+  type Op,
+  type Page,
+  walkNodes,
+} from '@designio/core';
 import { useEffect, useRef } from 'react';
 import { useDoc } from '../stores/doc';
 import { useUi } from '../stores/ui';
 import { type PageBoxes, pageBoxes, pathTo, pickTarget, screenToWorld, zoomAt } from './geometry';
-import { NodeView } from './NodeView';
+import { NodeView, PageBoxesContext } from './NodeView';
 import { Overlay } from './Overlay';
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -13,7 +23,9 @@ type Gesture =
   | { kind: 'press'; startX: number; startY: number; ids: string[]; pick: string; additive: boolean }
   | { kind: 'drag'; startX: number; startY: number; ids: string[] }
   | { kind: 'resize'; id: string; handle: Handle; abs: Box; local: Box; aspect: number }
-  | { kind: 'marquee'; start: { x: number; y: number }; base: string[]; scope: string | null };
+  | { kind: 'marquee'; start: { x: number; y: number }; base: string[]; scope: string | null }
+  | { kind: 'draw'; shape: 'frame' | 'rect'; start: { x: number; y: number }; parentId: string }
+  | { kind: 'connect'; fromId: string };
 
 function nodeOf(page: Page, id: string): Node | null {
   const stack: Node[] = [...page.children];
@@ -170,7 +182,7 @@ export function Canvas({ page }: { page: Page }) {
       return;
     }
     const handle = target.closest<HTMLElement>('[data-handle]')?.dataset.handle as Handle | undefined;
-    if (handle && ui.selection.length === 1) {
+    if (handle && ui.selection.length === 1 && ui.tool === 'select') {
       const id = ui.selection[0]!;
       const node = nodeOf(page, id);
       const abs = boxes.get(id);
@@ -210,7 +222,53 @@ export function Canvas({ page }: { page: Page }) {
       return;
     }
 
+    if (ui.tool === 'frame' || ui.tool === 'rect') {
+      const parentId =
+        ui.tool === 'rect' && raw && nodeOf(page, raw.id)?.type === 'frame'
+          ? raw.id
+          : ui.tool === 'rect' && ui.focusId
+            ? ui.focusId
+            : page.id;
+      gesture.current = { kind: 'draw', shape: ui.tool, start: world, parentId };
+      ui.set({
+        draftBox: { kind: ui.tool, box: { x: Math.round(world.x), y: Math.round(world.y), w: 1, h: 1 } },
+      });
+      capture();
+      return;
+    }
+
+    if (ui.tool === 'text') {
+      const containerId = raw && nodeOf(page, raw.id)?.type === 'frame' ? raw.id : (ui.focusId ?? page.id);
+      const parentBox = containerId !== page.id ? boxes.get(containerId) : null;
+      const node = normalizeSpec({
+        type: 'text',
+        text: 'Nuevo texto',
+        x: Math.round(world.x - (parentBox?.x ?? 0)),
+        y: Math.round(world.y - (parentBox?.y ?? 0)),
+        fontSize: 18,
+        color: '#1D231F',
+      });
+      void useDoc
+        .getState()
+        .commit([{ op: 'node.create', parentId: containerId, node }], 'Añadiste un texto')
+        .then(() => useUi.getState().set({ tool: 'select', selection: [node.id], rightTab: 'props' }));
+      return;
+    }
+
     const picked = pick(raw, e.ctrlKey || e.metaKey);
+
+    if (ui.tool === 'connect') {
+      const pickedNode = picked ? nodeOf(page, picked) : null;
+      if (!picked || !pickedNode || pickedNode.type === 'arrow') return;
+      gesture.current = { kind: 'connect', fromId: picked };
+      ui.set({
+        selection: [picked],
+        draftLink: { fromId: picked, to: world, hoverTargetId: null },
+      });
+      capture();
+      return;
+    }
+
     if (ui.interactiveId && ui.interactiveId !== picked) ui.set({ interactiveId: null });
     if (!picked) {
       if (!e.shiftKey) ui.select([]);
@@ -246,7 +304,7 @@ export function Canvas({ page }: { page: Page }) {
     const g = gesture.current;
     const { sx, sy } = local(e);
     if (!g) {
-      if (ui.tool !== 'select' || ui.spaceDown) return;
+      if ((ui.tool !== 'select' && ui.tool !== 'connect') || ui.spaceDown) return;
       const hover = pick(rawTarget(e.target), e.ctrlKey || e.metaKey);
       if (hover !== ui.hoverId) ui.set({ hoverId: hover });
       return;
@@ -274,6 +332,28 @@ export function Canvas({ page }: { page: Page }) {
       case 'resize': {
         const p = screenToWorld(ui.camera, sx, sy);
         ui.set({ resize: { id: g.id, box: resizeBox(g, p.x, p.y, e.shiftKey, e.altKey) } });
+        return;
+      }
+      case 'draw': {
+        const p = screenToWorld(ui.camera, sx, sy);
+        const box: Box = {
+          x: Math.round(Math.min(g.start.x, p.x)),
+          y: Math.round(Math.min(g.start.y, p.y)),
+          w: Math.max(1, Math.round(Math.abs(p.x - g.start.x))),
+          h: Math.max(1, Math.round(Math.abs(p.y - g.start.y))),
+        };
+        ui.set({ draftBox: { kind: g.shape, box } });
+        return;
+      }
+      case 'connect': {
+        const p = screenToWorld(ui.camera, sx, sy);
+        const candidate = pick(rawTarget(e.target), e.ctrlKey || e.metaKey);
+        const validTarget =
+          candidate && candidate !== g.fromId && nodeOf(page, candidate)?.type !== 'arrow' ? candidate : null;
+        ui.set({
+          hoverId: validTarget,
+          draftLink: { fromId: g.fromId, to: p, hoverTargetId: validTarget },
+        });
         return;
       }
       case 'marquee': {
@@ -345,6 +425,85 @@ export function Canvas({ page }: { page: Page }) {
       ui.set({ resize: null });
       return;
     }
+    if (g.kind === 'draw') {
+      const draft = ui.draftBox;
+      ui.set({ draftBox: null });
+      if (!draft) return;
+      const isTinyClick = draft.box.w < 10 && draft.box.h < 10;
+      const parentBox = g.parentId !== page.id ? boxes.get(g.parentId) : null;
+      let node: Node;
+      if (g.shape === 'frame') {
+        const preset = isTinyClick && ui.framePreset ? getPreset(ui.framePreset) : undefined;
+        const w = preset ? preset.w : isTinyClick ? 360 : draft.box.w;
+        const h = preset ? preset.h : isTinyClick ? 640 : draft.box.h;
+        node = normalizeSpec({
+          type: 'frame',
+          ...(preset ? { device: preset.id } : {}),
+          name: preset ? preset.label.split(' · ')[0] : 'Pantalla nueva',
+          x: Math.round(draft.box.x - (parentBox?.x ?? 0)),
+          y: Math.round(draft.box.y - (parentBox?.y ?? 0)),
+          w,
+          h,
+          fill: '#FFFFFF',
+          stroke: '#D5D3CA',
+          strokeWidth: 1,
+          radius: preset ? preset.radius : 20,
+        });
+      } else {
+        const w = isTinyClick ? 180 : draft.box.w;
+        const h = isTinyClick ? 110 : draft.box.h;
+        node = normalizeSpec({
+          type: 'rect',
+          name: 'Bloque',
+          x: Math.round(draft.box.x - (parentBox?.x ?? 0)),
+          y: Math.round(draft.box.y - (parentBox?.y ?? 0)),
+          w,
+          h,
+          fill: '#F1F0EA',
+          stroke: '#C8C5B8',
+          strokeWidth: 1.5,
+          radius: 12,
+        });
+      }
+      void commit(
+        [{ op: 'node.create', parentId: g.parentId, node }],
+        g.shape === 'frame' ? `Creaste «${node.name}»` : 'Añadiste un bloque',
+      ).then(() => useUi.getState().set({ tool: 'select', selection: [node.id], rightTab: 'props' }));
+      return;
+    }
+    if (g.kind === 'connect') {
+      const link = ui.draftLink;
+      ui.set({ draftLink: null });
+      const targetId = link?.hoverTargetId;
+      if (!targetId || targetId === g.fromId) return;
+      const fromNode = nodeOf(page, g.fromId);
+      const toNode = nodeOf(page, targetId);
+      if (!fromNode || !toNode) return;
+      let existingId: string | null = null;
+      walkNodes(page.children, (n) => {
+        if (n.type === 'arrow' && n.fromId === g.fromId && n.toId === targetId) existingId = n.id;
+      });
+      if (existingId) {
+        ui.set({ tool: 'select', selection: [existingId], rightTab: 'props' });
+        return;
+      }
+      const arrow = normalizeSpec(
+        {
+          type: 'arrow',
+          fromId: g.fromId,
+          toId: targetId,
+          name: `${fromNode.name} → ${toNode.name}`,
+          color: '#1C4B2B',
+          strokeWidth: 2.2,
+        },
+        { nodeBox: (id) => boxes.get(id) },
+      );
+      void commit(
+        [{ op: 'node.create', parentId: page.id, node: arrow }],
+        `Conectaste «${fromNode.name}» con «${toNode.name}»`,
+      ).then(() => useUi.getState().set({ tool: 'select', selection: [arrow.id], rightTab: 'props' }));
+      return;
+    }
     if (g.kind === 'marquee') ui.set({ marquee: null });
   };
 
@@ -378,11 +537,14 @@ export function Canvas({ page }: { page: Page }) {
     if (ui.focusId && !findNode(doc, ui.focusId)) ui.set({ focusId: null });
   }, [doc]);
 
+  const bg = page.background ?? '#EFEDE6';
+  const showDots = !page.background || page.background === '#E8E8E4' || page.background === '#EFEDE6';
+
   return (
     <div
       ref={ref}
-      className={`canvas tool-${tool}${spaceDown ? ' is-panning' : ''}`}
-      style={{ background: page.background ?? '#E8E8E4' }}
+      className={`canvas tool-${tool}${spaceDown ? ' is-panning' : ''}${showDots ? ' has-dots' : ''}`}
+      style={{ backgroundColor: bg }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -395,9 +557,11 @@ export function Canvas({ page }: { page: Page }) {
         className="world"
         style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.z})` }}
       >
-        {page.children.map((node) => (
-          <NodeView key={node.id} node={node} ox={0} oy={0} />
-        ))}
+        <PageBoxesContext.Provider value={boxes}>
+          {page.children.map((node) => (
+            <NodeView key={node.id} node={node} ox={0} oy={0} />
+          ))}
+        </PageBoxesContext.Provider>
       </div>
       <Overlay page={page} boxes={boxes} />
       {interactive && (

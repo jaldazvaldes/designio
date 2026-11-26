@@ -1,4 +1,12 @@
-import { cloneWithNewIds, findNode, type Node, type Op, type Page, pageBounds } from '@designio/core';
+import {
+  cloneWithNewIds,
+  DEVICE_PRESETS,
+  findNode,
+  type Node,
+  type Op,
+  type Page,
+  pageBounds,
+} from '@designio/core';
 import { useEffect, useRef } from 'react';
 import { Canvas, topmost } from './canvas/Canvas';
 import { fitCamera, pageBoxes, selectionBounds, zoomAt } from './canvas/geometry';
@@ -115,6 +123,7 @@ function onKeyDown(e: KeyboardEvent) {
       copy.y += 24;
       copy.name = `${loc.node.name} (copia)`;
       delete copy.status;
+      delete copy.entry;
       newIds.push(copy.id);
       ops.push({ op: 'node.create', parentId: loc.parent.id, index: loc.index + 1, node: copy });
     }
@@ -127,8 +136,14 @@ function onKeyDown(e: KeyboardEvent) {
   }
   if (mod) return;
 
+  if (e.key === '[') {
+    ui.set({ leftCollapsed: !ui.leftCollapsed });
+    return;
+  }
+
   if (e.key === 'Escape') {
     if (ui.composer) ui.set({ composer: null, tool: 'select' });
+    else if (ui.draftBox || ui.draftLink) ui.set({ draftBox: null, draftLink: null, tool: 'select' });
     else if (ui.interactiveId) ui.set({ interactiveId: null });
     else if (ui.focusId) {
       const parent = pageBoxes(page).get(ui.focusId)?.parentId ?? null;
@@ -171,7 +186,15 @@ function onKeyDown(e: KeyboardEvent) {
     );
     return;
   }
-  const tools: Record<string, Tool> = { v: 'select', h: 'hand', c: 'comment' };
+  const tools: Record<string, Tool> = {
+    v: 'select',
+    h: 'hand',
+    f: 'frame',
+    r: 'rect',
+    t: 'text',
+    l: 'connect',
+    c: 'comment',
+  };
   if (tools[key]) ui.set({ tool: tools[key]!, composer: null });
 }
 
@@ -219,33 +242,30 @@ function PresencePill() {
   );
 }
 
-function TopBar() {
+function TopBar({ pageName }: { pageName: string }) {
   const doc = useDoc((s) => s.doc);
   const connected = useDoc((s) => s.connected);
   const zoom = useUi((s) => s.camera.z);
-  const tool = useUi((s) => s.tool);
-  const toolButton = (t: Tool, label: string, key: string) => (
-    <button
-      type="button"
-      className={`tool${tool === t ? ' is-active' : ''}`}
-      title={`${label} (${key})`}
-      onClick={() => useUi.getState().set({ tool: t, composer: null })}
-    >
-      {label}
-    </button>
-  );
+  const leftCollapsed = useUi((s) => s.leftCollapsed);
   return (
     <header className="topbar">
-      <a className="brand" href="/" title="Documentos">
+      <button
+        type="button"
+        className={`icon-btn panel-toggle${leftCollapsed ? '' : ' is-open'}`}
+        title={leftCollapsed ? 'Mostrar páginas y capas ([)' : 'Ocultar páginas y capas ([)'}
+        onClick={() => useUi.getState().set({ leftCollapsed: !leftCollapsed })}
+      >
+        ☰
+      </button>
+      <a className="brand" href="/" title="Volver a documentos">
         <span className="logo" />
         designio
       </a>
-      <span className="doc-name">{doc?.name ?? '…'}</span>
-      <div className="tools">
-        {toolButton('select', 'Mover', 'V')}
-        {toolButton('hand', 'Mano', 'H')}
-        {toolButton('comment', 'Comentar', 'C')}
-      </div>
+      <span className="crumbs">
+        <strong className="doc-name">{doc?.name ?? '…'}</strong>
+        <span className="crumb-sep">/</span>
+        <span className="crumb-page">{pageName}</span>
+      </span>
       <div className="spacer" />
       <PresencePill />
       <div className="spacer" />
@@ -267,6 +287,110 @@ function TopBar() {
         </button>
       </div>
     </header>
+  );
+}
+
+function FloatingToolbar() {
+  const tool = useUi((s) => s.tool);
+  const framePreset = useUi((s) => s.framePreset);
+  const pick = (t: Tool) => useUi.getState().set({ tool: t, composer: null });
+
+  const item = (t: Tool, label: string, shortcut: string, icon: React.ReactNode) => (
+    <button
+      key={t}
+      type="button"
+      className={`ft-btn${tool === t ? ' is-active' : ''}`}
+      title={`${label} (${shortcut})`}
+      onClick={() => pick(t)}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+
+  return (
+    <div className="floating-dock" data-ui>
+      {tool === 'frame' && (
+        <div className="preset-bar">
+          <span>Dispositivo al hacer clic:</span>
+          <select value={framePreset} onChange={(e) => useUi.getState().set({ framePreset: e.target.value })}>
+            <option value="">Libre (arrastra)</option>
+            {Object.values(DEVICE_PRESETS).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {tool === 'connect' && (
+        <div className="preset-bar">
+          <span>Arrastra de una pantalla a otra para indicar de dónde a dónde va el usuario</span>
+        </div>
+      )}
+      <div className="floating-toolbar">
+        {item(
+          'select',
+          'Mover',
+          'V',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <path d="M5 3l6 16 2.3-6.7L20 10z" />
+          </svg>,
+        )}
+        {item(
+          'hand',
+          'Mano',
+          'H',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <path d="M8 12.5V6a1.5 1.5 0 013 0v5.5m0-6.5a1.5 1.5 0 013 0v6m0-5a1.5 1.5 0 013 0v7c0 3.9-2.6 7-6.6 7-2.9 0-4.5-1.6-5.6-3.7L3.4 12a1.5 1.5 0 012.6-1.5L8 13" />
+          </svg>,
+        )}
+        <span className="ft-sep" />
+        {item(
+          'frame',
+          'Pantalla',
+          'F',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <path d="M4 8h16M4 16h16M8 4v16M16 4v16" />
+          </svg>,
+        )}
+        {item(
+          'rect',
+          'Bloque',
+          'R',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <rect x="4" y="6" width="16" height="12" rx="2.5" />
+          </svg>,
+        )}
+        {item(
+          'text',
+          'Texto',
+          'T',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <path d="M5 7V5h14v2M12 5v14M9 19h6" />
+          </svg>,
+        )}
+        <span className="ft-sep" />
+        {item(
+          'connect',
+          'Conectar',
+          'L',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <circle cx="5" cy="18" r="2.5" />
+            <path d="M7.5 17C12 16 12 8 17.5 7" />
+            <path d="M15.5 4.5L19 7l-3.5 2.5" />
+          </svg>,
+        )}
+        {item(
+          'comment',
+          'Comentar',
+          'C',
+          <svg viewBox="0 0 24 24" className="ft-ico" aria-hidden>
+            <path d="M20 12a8 8 0 01-11.6 7.1L4 20l1-4.4A8 8 0 1120 12z" />
+          </svg>,
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -307,6 +431,7 @@ export function Editor({ docId }: { docId: string }) {
   const diskError = useDoc((s) => s.diskError);
   const restore = useDoc((s) => s.restore);
   const pageId = useUi((s) => s.pageId);
+  const leftCollapsed = useUi((s) => s.leftCollapsed);
   const page = doc ? (doc.pages.find((p) => p.id === pageId) ?? doc.pages[0]!) : null;
   const fitted = useRef<string | null>(null);
 
@@ -357,7 +482,7 @@ export function Editor({ docId }: { docId: string }) {
 
   return (
     <div className="app">
-      <TopBar />
+      <TopBar pageName={page.name} />
       {diskError && (
         <div className="banner banner-error">
           <strong>El archivo en disco no es válido</strong> y los cambios están en pausa:{' '}
@@ -368,9 +493,10 @@ export function Editor({ docId }: { docId: string }) {
         </div>
       )}
       <div className="workspace">
-        <LeftPanel doc={doc} page={page} />
+        {!leftCollapsed && <LeftPanel doc={doc} page={page} />}
         <main className="stage">
           <Canvas page={page} />
+          <FloatingToolbar />
         </main>
         <RightPanel doc={doc} page={page} />
       </div>

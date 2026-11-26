@@ -1,7 +1,14 @@
-import { absoluteBox, type DesignioDocument, findNode, findPage, type Node } from '@designio/core';
+import {
+  absoluteBox,
+  absoluteBoxes,
+  type DesignioDocument,
+  findNode,
+  findPage,
+  type Node,
+} from '@designio/core';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import { NodeView, RenderContext, type RenderMode } from '../canvas/NodeView';
+import { NodeView, PageBoxesContext, RenderContext, type RenderMode } from '../canvas/NodeView';
 import { useStatus } from '../stores/status';
 
 declare global {
@@ -97,10 +104,12 @@ export function RenderPage() {
 
   let content: React.ReactNode = null;
   let background: string | undefined;
+  let boxes = null;
   if (nodeId) {
     const loc = findNode(doc, nodeId);
     const abs = absoluteBox(doc, nodeId);
     if (loc && abs) {
+      boxes = absoluteBoxes(loc.page);
       const ox = abs.x - loc.node.x;
       const oy = abs.y - loc.node.y;
       background = loc.page.background ?? '#E8E8E4';
@@ -115,6 +124,7 @@ export function RenderPage() {
     }
   } else {
     const page = (pageId ? findPage(doc, pageId) : null) ?? doc.pages[0]!;
+    boxes = absoluteBoxes(page);
     background = page.background ?? '#E8E8E4';
     const rx = region?.[0] ?? 0;
     const ry = region?.[1] ?? 0;
@@ -129,17 +139,19 @@ export function RenderPage() {
 
   return (
     <RenderContext.Provider value={{ ...mode, folder: state.folder }}>
-      <div
-        className="render-root"
-        style={{
-          background: transparent ? 'transparent' : background,
-          transform: k !== 1 ? `scale(${k})` : undefined,
-          width: `${100 / k}%`,
-          height: `${100 / k}%`,
-        }}
-      >
-        {content}
-      </div>
+      <PageBoxesContext.Provider value={boxes}>
+        <div
+          className="render-root"
+          style={{
+            background: transparent ? 'transparent' : background,
+            transform: k !== 1 ? `scale(${k})` : undefined,
+            width: `${100 / k}%`,
+            height: `${100 / k}%`,
+          }}
+        >
+          {content}
+        </div>
+      </PageBoxesContext.Provider>
     </RenderContext.Provider>
   );
 }

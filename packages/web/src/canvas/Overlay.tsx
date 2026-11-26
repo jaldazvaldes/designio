@@ -1,19 +1,22 @@
 import {
+  analyzePageFlow,
   type Box,
   type Comment,
+  connectorCurve,
   findNode,
   type Node,
   newId,
   type Page,
+  pageBounds,
   STATUS_LABELS,
   walkNodes,
 } from '@designio/core';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Spark } from '../components/people';
 import { useDoc } from '../stores/doc';
 import { useUi } from '../stores/ui';
 import { AiPresence } from './AiPresence';
-import { boxToScreen, type PageBoxes, selectionBounds } from './geometry';
+import { boxToScreen, fitCamera, type PageBoxes, selectionBounds } from './geometry';
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 
@@ -56,6 +59,16 @@ function commentPosition(comment: Comment, boxes: PageBoxes): { x: number; y: nu
   if (!comment.nodeId) return { x: comment.x, y: comment.y };
   const b = boxes.get(comment.nodeId);
   return b ? { x: b.x + comment.x, y: b.y + comment.y } : null;
+}
+
+export function goToNode(boxes: PageBoxes, nodeId: string) {
+  const b = boxes.get(nodeId);
+  if (!b) return;
+  const ui = useUi.getState();
+  ui.set({
+    selection: [nodeId],
+    camera: fitCamera(b, ui.viewport, 110, 1.15),
+  });
 }
 
 function Composer({ boxes }: { boxes: PageBoxes }) {
@@ -130,11 +143,143 @@ function Composer({ boxes }: { boxes: PageBoxes }) {
   );
 }
 
+/** Barra superior flotante para saltar entre pantallas conectadas como si usaras la app. */
+function FlowNavigator({
+  page,
+  boxes,
+  selectedId,
+}: {
+  page: Page;
+  boxes: PageBoxes;
+  selectedId: string | null;
+}) {
+  const flow = useMemo(() => analyzePageFlow(page), [page]);
+  if (flow.edges.length === 0 && !page.summary) return null;
+
+  if (selectedId) {
+    const incoming = flow.incoming.get(selectedId) ?? [];
+    const outgoing = flow.outgoing.get(selectedId) ?? [];
+    if (incoming.length > 0 || outgoing.length > 0) {
+      return (
+        <nav className="flow-bar" data-ui onPointerDown={(e) => e.stopPropagation()}>
+          {incoming.map((edge) => (
+            <button
+              key={edge.arrowId}
+              type="button"
+              className="flow-chip is-back"
+              title={`Volver a «${edge.fromName}»`}
+              onClick={() => goToNode(boxes, edge.fromId)}
+            >
+              ← {edge.fromName}
+              {edge.label ? <em>· {edge.label}</em> : null}
+            </button>
+          ))}
+          {incoming.length > 0 && outgoing.length > 0 && <span className="flow-sep" />}
+          {outgoing.map((edge) => (
+            <button
+              key={edge.arrowId}
+              type="button"
+              className="flow-chip is-next"
+              title={`Ir a «${edge.toName}»`}
+              onClick={() => goToNode(boxes, edge.toId)}
+            >
+              {edge.label ? <em>{edge.label} →</em> : 'Ir a →'} <strong>{edge.toName}</strong>
+            </button>
+          ))}
+        </nav>
+      );
+    }
+  }
+
+  if (flow.entries.length > 0) {
+    const first = flow.entries[0]!;
+    return (
+      <nav className="flow-bar is-subtle" data-ui onPointerDown={(e) => e.stopPropagation()}>
+        <span className="flow-summary">
+          {page.summary
+            ? page.summary.length > 76
+              ? `${page.summary.slice(0, 76)}…`
+              : page.summary
+            : `Recorrido con ${flow.steps.length} pantallas`}
+        </span>
+        <button type="button" className="flow-chip is-next" onClick={() => goToNode(boxes, first.id)}>
+          ★ Empezar en «{first.name}» →
+        </button>
+      </nav>
+    );
+  }
+  return null;
+}
+
+function Minimap({ page }: { page: Page }) {
+  const camera = useUi((s) => s.camera);
+  const viewport = useUi((s) => s.viewport);
+  const bounds = useMemo(() => pageBounds(page), [page]);
+  if (!bounds || bounds.w <= 0 || bounds.h <= 0 || viewport.w < 560) return null;
+
+  const W = 144;
+  const H = 90;
+  const pad = 8;
+  const scale = Math.min((W - pad * 2) / bounds.w, (H - pad * 2) / bounds.h);
+  const ox = (W - bounds.w * scale) / 2 - bounds.x * scale;
+  const oy = (H - bounds.h * scale) / 2 - bounds.y * scale;
+
+  const vpWorldX = -camera.x / camera.z;
+  const vpWorldY = -camera.y / camera.z;
+  const vpWorldW = viewport.w / camera.z;
+  const vpWorldH = viewport.h / camera.z;
+
+  const jump = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const wx = (e.clientX - rect.left - ox) / scale;
+    const wy = (e.clientY - rect.top - oy) / scale;
+    const ui = useUi.getState();
+    ui.set({
+      camera: {
+        ...ui.camera,
+        x: ui.viewport.w / 2 - wx * ui.camera.z,
+        y: ui.viewport.h / 2 - wy * ui.camera.z,
+      },
+    });
+  };
+
+  return (
+    <div className="minimap" data-ui title="Mapa de la página (clic para desplazarte)" onPointerDown={jump}>
+      {page.children
+        .filter((n) => !n.hidden && n.type !== 'arrow')
+        .map((n) => (
+          <i
+            key={n.id}
+            className={n.status ? `s-${n.status}` : undefined}
+            style={{
+              left: ox + n.x * scale,
+              top: oy + n.y * scale,
+              width: Math.max(3, n.w * scale),
+              height: Math.max(3, n.h * scale),
+            }}
+          />
+        ))}
+      <div
+        className="minimap-vp"
+        style={{
+          left: Math.max(0, ox + vpWorldX * scale),
+          top: Math.max(0, oy + vpWorldY * scale),
+          width: Math.min(W, Math.max(8, vpWorldW * scale)),
+          height: Math.min(H, Math.max(6, vpWorldH * scale)),
+        }}
+      />
+    </div>
+  );
+}
+
 export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
   const camera = useUi((s) => s.camera);
   const selection = useUi((s) => s.selection);
   const hoverId = useUi((s) => s.hoverId);
   const marquee = useUi((s) => s.marquee);
+  const draftBox = useUi((s) => s.draftBox);
+  const draftLink = useUi((s) => s.draftLink);
   const drag = useUi((s) => s.drag);
   const resize = useUi((s) => s.resize);
   const activeCommentId = useUi((s) => s.activeCommentId);
@@ -148,9 +293,15 @@ export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
   const visible = (b: Box) =>
     b.x + b.w > -50 && b.y + b.h > -50 && b.x < viewport.w + 50 && b.y < viewport.h + 50;
 
+  const flow = useMemo(() => analyzePageFlow(page), [page]);
+  const entryIds = useMemo(() => new Set(flow.entries.map((e) => e.id)), [flow]);
+
   const statusNodes: Node[] = [];
+  const entryNodes: Node[] = [];
   walkNodes(page.children, (n) => {
-    if (n.status && !n.hidden) statusNodes.push(n);
+    if (n.hidden) return;
+    if (n.status) statusNodes.push(n);
+    if (n.entry || entryIds.has(n.id)) entryNodes.push(n);
   });
 
   const selected = selection.filter((id) => boxes.has(id));
@@ -196,6 +347,19 @@ export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
             </div>
           );
         })}
+
+      {/* Indicador de pantalla inicial del flujo */}
+      {entryNodes.map((n) => {
+        const b = live(n.id);
+        if (!b) return null;
+        const s = boxToScreen(camera, b);
+        if (!visible(s) || s.w < 44) return null;
+        return (
+          <div key={`entry-${n.id}`} className="entry-badge" style={{ left: s.x, top: s.y - 24 }}>
+            ★ Inicio
+          </div>
+        );
+      })}
 
       {/* Estados: contorno + etiqueta */}
       {statusNodes.map((n) => {
@@ -255,6 +419,7 @@ export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
         );
       })}
       {selBox &&
+        !(singleNode?.type === 'arrow' && singleNode.fromId && singleNode.toId) &&
         (() => {
           const s = boxToScreen(camera, selBox);
           return (
@@ -276,6 +441,58 @@ export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
                 {Math.round(selBox.w)} × {Math.round(selBox.h)}
               </div>
             </>
+          );
+        })()}
+
+      {/* Boceto en curso (Marco / Bloque) */}
+      {draftBox &&
+        (() => {
+          const s = boxToScreen(camera, draftBox.box);
+          return (
+            <div className="draft-box" style={{ left: s.x, top: s.y, width: s.w, height: s.h }}>
+              <span>
+                {Math.round(draftBox.box.w)} × {Math.round(draftBox.box.h)}
+              </span>
+            </div>
+          );
+        })()}
+
+      {/* Conexión en curso (Conectar) */}
+      {draftLink &&
+        (() => {
+          const fromWorld = boxes.get(draftLink.fromId);
+          if (!fromWorld) return null;
+          const fromS = boxToScreen(camera, fromWorld);
+          const toWorld = draftLink.hoverTargetId
+            ? boxes.get(draftLink.hoverTargetId)
+            : { x: draftLink.to.x, y: draftLink.to.y, w: 1, h: 1 };
+          if (!toWorld) return null;
+          const toS = boxToScreen(camera, toWorld);
+          const curve = connectorCurve(fromS, toS);
+          return (
+            <svg className="draft-link" width={viewport.w} height={viewport.h} aria-hidden>
+              <defs>
+                <marker
+                  id="draft-head"
+                  viewBox="0 0 10 10"
+                  refX="8.5"
+                  refY="5"
+                  markerWidth="6.5"
+                  markerHeight="6.5"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M0,0.5 L10,5 L0,9.5 z" fill="#1C4B2B" />
+                </marker>
+              </defs>
+              <path
+                d={curve.path}
+                fill="none"
+                stroke="#1C4B2B"
+                strokeWidth={2.2}
+                strokeDasharray="6 4"
+                markerEnd="url(#draft-head)"
+              />
+            </svg>
           );
         })()}
 
@@ -309,6 +526,8 @@ export function Overlay({ page, boxes }: { page: Page; boxes: PageBoxes }) {
         })}
       <AiPresence boxes={boxes} />
       <Composer boxes={boxes} />
+      <FlowNavigator page={page} boxes={boxes} selectedId={single} />
+      <Minimap page={page} />
     </div>
   );
 }
